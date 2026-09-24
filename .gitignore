@@ -17,6 +17,7 @@ pnpm-debug.log*
 apps/api/dist/
 apps/api/.env
 apps/api/*.tsbuildinfo
+apps/api/src/generated/
 
 # --- Next.js (apps/web) ---
 apps/web/.next/
