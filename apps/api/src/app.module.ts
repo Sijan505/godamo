@@ -4,11 +4,15 @@ import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { AuditModule } from './audit/audit.module.js';
 import { AuthModule } from './auth/auth.module.js';
+import { CategoriesModule } from './categories/categories.module.js';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard.js';
 import { RolesGuard } from './common/guards/roles.guard.js';
 import { validateEnv } from './config/env.validation.js';
 import { HealthController } from './health/health.controller.js';
+import { PartiesModule } from './parties/parties.module.js';
+import { PricingModule } from './pricing/pricing.module.js';
 import { PrismaModule } from './prisma/prisma.module.js';
+import { ProductsModule } from './products/products.module.js';
 import { UsersModule } from './users/users.module.js';
 
 @Module({
@@ -20,6 +24,10 @@ import { UsersModule } from './users/users.module.js';
     AuditModule,
     AuthModule,
     UsersModule,
+    CategoriesModule,
+    PricingModule,
+    ProductsModule,
+    PartiesModule,
   ],
   controllers: [HealthController],
   providers: [

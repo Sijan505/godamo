@@ -10,3 +10,9 @@ export const PASSWORD_MAX_LENGTH = 72;
 
 export const Trim = () =>
   Transform(({ value }) => (typeof value === 'string' ? value.trim() : value));
+
+/** Optional query-string boolean: "true"/"false" -> true/false. */
+export const QueryBoolean = () =>
+  Transform(({ value }) =>
+    value === 'true' ? true : value === 'false' ? false : value,
+  );

@@ -8,8 +8,9 @@ export interface AuditEntry {
   entity: string;
   entityId: string;
   action: AuditAction;
-  oldValue?: Prisma.InputJsonValue;
-  newValue?: Prisma.InputJsonValue;
+  /** Any JSON-serialisable value; Decimals and Dates are stored as strings. */
+  oldValue?: unknown;
+  newValue?: unknown;
 }
 
 @Injectable()
@@ -21,6 +22,19 @@ export class AuditService {
    * change and its audit row commit (or roll back) together. Never pass secrets.
    */
   async log(entry: AuditEntry, tx?: Prisma.TransactionClient) {
-    await (tx ?? this.prisma).auditLog.create({ data: entry });
+    await (tx ?? this.prisma).auditLog.create({
+      data: {
+        ...entry,
+        oldValue: toJson(entry.oldValue),
+        newValue: toJson(entry.newValue),
+      },
+    });
   }
+}
+
+// Decimal and Date both implement toJSON, so a JSON round trip turns them into strings.
+function toJson(value: unknown): Prisma.InputJsonValue | undefined {
+  return value == null
+    ? undefined
+    : (JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue);
 }
