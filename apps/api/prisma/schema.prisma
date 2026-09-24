@@ -84,6 +84,16 @@ enum LedgerEntryType {
   ADJUSTMENT
 }
 
+enum PurchaseStatus {
+  POSTED
+  CANCELLED
+}
+
+enum StockCountStatus {
+  PENDING // counted, differences not yet posted
+  APPLIED // ADJUSTMENT movements posted
+}
+
 enum AuditAction {
   CREATE
   UPDATE
@@ -129,6 +139,10 @@ model Tenant {
   invoiceSequences InvoiceSequence[]
   auditLogs        AuditLog[]
   refreshTokens    RefreshToken[]
+  stockTransfers   StockTransfer[]
+  stockAdjustments StockAdjustment[]
+  stockCounts      StockCount[]
+  stockCountItems  StockCountItem[]
 
   @@map("tenants")
 }
@@ -146,16 +160,21 @@ model User {
   createdAt    DateTime  @default(now()) @map("created_at")
   updatedAt    DateTime  @updatedAt @map("updated_at")
 
-  tenant           Tenant          @relation(fields: [tenantId], references: [id])
-  beats            Beat[]
-  stockMovements   StockMovement[]
-  purchases        Purchase[]
-  salesOrders      SalesOrder[]
-  invoices         Invoice[]
-  salesReturns     SalesReturn[]
-  paymentsReceived Payment[]
-  auditLogs        AuditLog[]
-  refreshTokens    RefreshToken[]
+  tenant             Tenant            @relation(fields: [tenantId], references: [id])
+  beats              Beat[]
+  stockMovements     StockMovement[]
+  purchases          Purchase[]        @relation("PurchaseCreatedBy")
+  salesOrders        SalesOrder[]
+  invoices           Invoice[]
+  salesReturns       SalesReturn[]
+  paymentsReceived   Payment[]
+  auditLogs          AuditLog[]
+  refreshTokens      RefreshToken[]
+  purchasesCancelled Purchase[]        @relation("PurchaseCancelledBy")
+  stockTransfers     StockTransfer[]
+  stockAdjustments   StockAdjustment[]
+  stockCountsCreated StockCount[]      @relation("StockCountCreatedBy")
+  stockCountsApplied StockCount[]      @relation("StockCountAppliedBy")
 
   @@unique([tenantId, phone])
   @@map("users")
@@ -190,12 +209,16 @@ model Godown {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  tenant         Tenant          @relation(fields: [tenantId], references: [id])
+  tenant         Tenant            @relation(fields: [tenantId], references: [id])
   stockMovements StockMovement[]
   purchases      Purchase[]
   salesOrders    SalesOrder[]
   invoices       Invoice[]
   salesReturns   SalesReturn[]
+  transfersOut   StockTransfer[]   @relation("TransferFrom")
+  transfersIn    StockTransfer[]   @relation("TransferTo")
+  adjustments    StockAdjustment[]
+  stockCounts    StockCount[]
 
   @@unique([tenantId, name])
   @@map("godowns")
@@ -250,6 +273,7 @@ model Product {
   salesOrderItems  SalesOrderItem[]
   invoiceItems     InvoiceItem[]
   salesReturnItems SalesReturnItem[]
+  stockCountItems  StockCountItem[]
 
   @@unique([tenantId, sku])
   @@unique([tenantId, barcode])
@@ -276,6 +300,7 @@ model ProductUnit {
   salesOrderItems  SalesOrderItem[]
   invoiceItems     InvoiceItem[]
   salesReturnItems SalesReturnItem[]
+  stockCountItems  StockCountItem[]
 
   @@unique([productId, name])
   @@index([tenantId])
@@ -410,6 +435,7 @@ model Batch {
   purchaseItems    PurchaseItem[]
   invoiceItems     InvoiceItem[]
   salesReturnItems SalesReturnItem[]
+  stockCountItems  StockCountItem[]
 
   @@unique([productId, batchNo])
   @@index([productId, expiryDate]) // FEFO picking
@@ -443,33 +469,123 @@ model StockMovement {
   createdBy  User           @relation(fields: [createdById], references: [id])
 
   @@index([tenantId, productId, godownId])
+  @@index([tenantId, godownId, productId])
   @@index([refType, refId])
   @@index([batchId])
   @@map("stock_movements")
 }
 
+// Header for a godown-to-godown transfer; its movements use refType "TRANSFER".
+model StockTransfer {
+  id           String   @id @default(uuid())
+  tenantId     String   @map("tenant_id")
+  fromGodownId String   @map("from_godown_id")
+  toGodownId   String   @map("to_godown_id")
+  note         String?
+  createdById  String   @map("created_by_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  tenant     Tenant @relation(fields: [tenantId], references: [id])
+  fromGodown Godown @relation("TransferFrom", fields: [fromGodownId], references: [id])
+  toGodown   Godown @relation("TransferTo", fields: [toGodownId], references: [id])
+  createdBy  User   @relation(fields: [createdById], references: [id])
+
+  @@index([tenantId, createdAt])
+  @@map("stock_transfers")
+}
+
+// Header for a manual ADJUSTMENT or DAMAGE; its movements use refType "ADJUSTMENT".
+model StockAdjustment {
+  id          String       @id @default(uuid())
+  tenantId    String       @map("tenant_id")
+  godownId    String       @map("godown_id")
+  type        MovementType // ADJUSTMENT or DAMAGE
+  reason      String
+  createdById String       @map("created_by_id")
+  createdAt   DateTime     @default(now()) @map("created_at")
+
+  tenant    Tenant @relation(fields: [tenantId], references: [id])
+  godown    Godown @relation(fields: [godownId], references: [id])
+  createdBy User   @relation(fields: [createdById], references: [id])
+
+  @@index([tenantId, createdAt])
+  @@map("stock_adjustments")
+}
+
+// Physical stock count. Differences are frozen when counted and posted as
+// ADJUSTMENT movements (refType "STOCK_COUNT") when applied.
+model StockCount {
+  id          String           @id @default(uuid())
+  tenantId    String           @map("tenant_id")
+  godownId    String           @map("godown_id")
+  status      StockCountStatus @default(PENDING)
+  note        String?
+  createdById String           @map("created_by_id")
+  appliedById String?          @map("applied_by_id")
+  appliedAt   DateTime?        @map("applied_at")
+  createdAt   DateTime         @default(now()) @map("created_at")
+  updatedAt   DateTime         @updatedAt @map("updated_at")
+
+  tenant    Tenant           @relation(fields: [tenantId], references: [id])
+  godown    Godown           @relation(fields: [godownId], references: [id])
+  createdBy User             @relation("StockCountCreatedBy", fields: [createdById], references: [id])
+  appliedBy User?            @relation("StockCountAppliedBy", fields: [appliedById], references: [id])
+  items     StockCountItem[]
+
+  @@index([tenantId, createdAt])
+  @@map("stock_counts")
+}
+
+model StockCountItem {
+  id                String   @id @default(uuid())
+  tenantId          String   @map("tenant_id")
+  countId           String   @map("count_id")
+  productId         String   @map("product_id")
+  batchId           String?  @map("batch_id")
+  unitId            String   @map("unit_id")
+  countedQty        Decimal  @map("counted_qty") @db.Decimal(14, 3) // in the chosen unit
+  countedBaseQty    Decimal  @map("counted_base_qty") @db.Decimal(14, 3)
+  systemBaseQty     Decimal  @map("system_base_qty") @db.Decimal(14, 3) // stock when counted
+  differenceBaseQty Decimal  @map("difference_base_qty") @db.Decimal(14, 3) // counted - system
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  tenant  Tenant      @relation(fields: [tenantId], references: [id])
+  count   StockCount  @relation(fields: [countId], references: [id])
+  product Product     @relation(fields: [productId], references: [id])
+  batch   Batch?      @relation(fields: [batchId], references: [id])
+  unit    ProductUnit @relation(fields: [unitId], references: [id])
+
+  @@index([countId])
+  @@map("stock_count_items")
+}
+
 // ─── Purchasing ─────────────────────────────────────────────────────────────
 
 model Purchase {
-  id             String   @id @default(uuid())
-  tenantId       String   @map("tenant_id")
-  supplierId     String   @map("supplier_id")
-  godownId       String   @map("godown_id")
-  supplierBillNo String   @map("supplier_bill_no")
-  purchaseDate   DateTime @map("purchase_date") @db.Date
-  subtotal       Decimal  @db.Decimal(14, 2)
-  discount       Decimal  @default(0) @db.Decimal(14, 2)
-  vatAmount      Decimal  @default(0) @map("vat_amount") @db.Decimal(14, 2)
-  total          Decimal  @db.Decimal(14, 2)
-  createdById    String   @map("created_by_id")
-  createdAt      DateTime @default(now()) @map("created_at")
-  updatedAt      DateTime @updatedAt @map("updated_at")
+  id             String         @id @default(uuid())
+  tenantId       String         @map("tenant_id")
+  supplierId     String         @map("supplier_id")
+  godownId       String         @map("godown_id")
+  supplierBillNo String         @map("supplier_bill_no")
+  purchaseDate   DateTime       @map("purchase_date") @db.Date
+  subtotal       Decimal        @db.Decimal(14, 2)
+  discount       Decimal        @default(0) @db.Decimal(14, 2)
+  vatAmount      Decimal        @default(0) @map("vat_amount") @db.Decimal(14, 2)
+  total          Decimal        @db.Decimal(14, 2)
+  status         PurchaseStatus @default(POSTED)
+  cancelReason   String?        @map("cancel_reason")
+  cancelledAt    DateTime?      @map("cancelled_at")
+  cancelledById  String?        @map("cancelled_by_id")
+  createdById    String         @map("created_by_id")
+  createdAt      DateTime       @default(now()) @map("created_at")
+  updatedAt      DateTime       @updatedAt @map("updated_at")
 
-  tenant    Tenant         @relation(fields: [tenantId], references: [id])
-  supplier  Party          @relation(fields: [supplierId], references: [id])
-  godown    Godown         @relation(fields: [godownId], references: [id])
-  createdBy User           @relation(fields: [createdById], references: [id])
-  items     PurchaseItem[]
+  tenant      Tenant         @relation(fields: [tenantId], references: [id])
+  supplier    Party          @relation(fields: [supplierId], references: [id])
+  godown      Godown         @relation(fields: [godownId], references: [id])
+  createdBy   User           @relation("PurchaseCreatedBy", fields: [createdById], references: [id])
+  cancelledBy User?          @relation("PurchaseCancelledBy", fields: [cancelledById], references: [id])
+  items       PurchaseItem[]
 
   @@unique([tenantId, supplierId, supplierBillNo]) // same supplier bill can't be entered twice
   @@index([tenantId, purchaseDate])
@@ -487,7 +603,8 @@ model PurchaseItem {
   baseQuantity Decimal  @map("base_quantity") @db.Decimal(14, 3)
   rate         Decimal  @db.Decimal(14, 2) // per chosen unit
   discount     Decimal  @default(0) @db.Decimal(14, 2)
-  amount       Decimal  @db.Decimal(14, 2)
+  amount       Decimal  @db.Decimal(14, 2) // quantity x rate - discount, before VAT
+  vatAmount    Decimal  @default(0) @map("vat_amount") @db.Decimal(14, 2)
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 

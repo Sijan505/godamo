@@ -68,5 +68,5 @@ export function fromBase(baseQty: DecimalInput, units: UnitDef[]): Breakdown {
   const text = parts
     .map((p) => `${p.quantity.toString()} ${p.unitName}`)
     .join(' ');
-  return { parts, text: total.isNegative() ? `-${text}` : text };
+  return { parts, text: total.lt(0) ? `-${text}` : text };
 }

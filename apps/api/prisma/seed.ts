@@ -4,9 +4,12 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import {
   MovementType,
   PartyType,
+  Prisma,
   PrismaClient,
   UserRole,
 } from '../src/generated/prisma/client.js';
+import { addDays, nepalToday } from '../src/common/dates.js';
+import { StockService } from '../src/stock/stock.service.js';
 
 const TENANT_CODE = 'DEMO';
 const TENANT_NAME = 'Demo Distributors Pvt. Ltd.';
@@ -14,6 +17,8 @@ const TENANT_NAME = 'Demo Distributors Pvt. Ltd.';
 const prisma = new PrismaClient({
   adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL! }),
 });
+// Opening stock goes through the stock engine like every other movement.
+const stock = new StockService();
 
 // Tier price = retailer price per pcs × tier multiplier × unit factor × bulk-unit discount.
 const TIERS = [
@@ -28,7 +33,46 @@ const UNIT_DISCOUNT: Record<string, number> = {
   carton: 0.98,
 };
 
-const PRODUCTS = [
+/** pcs (base) + box + carton; box is the default sale unit, carton the purchase unit. */
+const units = (box: number, carton: number) => [
+  { name: 'pcs', factor: 1, isDefaultSale: false, isDefaultPurchase: false },
+  { name: 'box', factor: box, isDefaultSale: true, isDefaultPurchase: false },
+  {
+    name: 'carton',
+    factor: carton,
+    isDefaultSale: false,
+    isDefaultPurchase: true,
+  },
+];
+
+interface SeedBatch {
+  batchNo: string;
+  mfgDate?: string;
+  /** Fixed expiry date… */
+  expiryDate?: string;
+  /** …or days from today (negative = already expired), so FEFO demos stay realistic. */
+  expiresInDays?: number;
+  qty: number;
+}
+
+interface SeedProduct {
+  sku: string;
+  barcode: string;
+  name: string;
+  nameNepali: string;
+  category: string;
+  brand: string;
+  reorderLevel: number;
+  retailPricePerPcs: number;
+  costPerPcs: number;
+  units: ReturnType<typeof units>;
+  /** Non-batch products: opening pcs in Main Godown. */
+  openingPcs?: number;
+  /** Batch-tracked products: opening stock per batch in Main Godown. */
+  batches?: SeedBatch[];
+}
+
+const CORE_PRODUCTS: SeedProduct[] = [
   {
     sku: 'FNB-WAIWAI-75',
     barcode: '8901234500011',
@@ -36,30 +80,10 @@ const PRODUCTS = [
     nameNepali: 'वाइवाइ चिकेन चाउचाउ ७५ ग्राम',
     category: 'Food & Beverage',
     brand: 'Wai Wai',
-    trackBatch: false,
-    reorderLevel: 1200, // pcs
+    reorderLevel: 1200,
     retailPricePerPcs: 25,
     costPerPcs: 21.5,
-    units: [
-      {
-        name: 'pcs',
-        factor: 1,
-        isDefaultSale: false,
-        isDefaultPurchase: false,
-      },
-      {
-        name: 'box',
-        factor: 30,
-        isDefaultSale: true,
-        isDefaultPurchase: false,
-      },
-      {
-        name: 'carton',
-        factor: 120,
-        isDefaultSale: false,
-        isDefaultPurchase: true,
-      },
-    ],
+    units: units(30, 120),
     openingPcs: 6000, // 50 cartons
   },
   {
@@ -69,25 +93,10 @@ const PRODUCTS = [
     nameNepali: 'कोका-कोला २५० मिलि',
     category: 'Food & Beverage',
     brand: 'Coca-Cola',
-    trackBatch: false,
     reorderLevel: 480,
     retailPricePerPcs: 50,
     costPerPcs: 42,
-    units: [
-      {
-        name: 'pcs',
-        factor: 1,
-        isDefaultSale: false,
-        isDefaultPurchase: false,
-      },
-      { name: 'box', factor: 6, isDefaultSale: true, isDefaultPurchase: false },
-      {
-        name: 'carton',
-        factor: 24,
-        isDefaultSale: false,
-        isDefaultPurchase: true,
-      },
-    ],
+    units: units(6, 24),
     openingPcs: 2400, // 100 cartons
   },
   {
@@ -97,50 +106,166 @@ const PRODUCTS = [
     nameNepali: 'लाइफबोय साबुन १०० ग्राम',
     category: 'Personal Care',
     brand: 'Lifebuoy',
-    trackBatch: true,
     reorderLevel: 288,
     retailPricePerPcs: 55,
     costPerPcs: 46.25,
-    units: [
+    units: units(12, 144),
+    batches: [
       {
-        name: 'pcs',
-        factor: 1,
-        isDefaultSale: false,
-        isDefaultPurchase: false,
-      },
-      {
-        name: 'box',
-        factor: 12,
-        isDefaultSale: true,
-        isDefaultPurchase: false,
-      },
-      {
-        name: 'carton',
-        factor: 144,
-        isDefaultSale: false,
-        isDefaultPurchase: true,
+        batchNo: 'LB-2083-01',
+        mfgDate: '2026-08-01',
+        expiryDate: '2028-07-31',
+        qty: 1440, // 10 cartons
       },
     ],
-    openingPcs: 1440, // 10 cartons
-    batch: {
-      batchNo: 'LB-2083-01',
-      mfgDate: '2026-08-01',
-      expiryDate: '2028-07-31',
-    },
   },
 ];
 
-async function main() {
-  const existing = await prisma.tenant.findUnique({
-    where: { code: TENANT_CODE },
+// Batch-tracked products with staggered expiries for testing FEFO, the
+// expiring-stock report and the "expired batches are skipped" rule.
+const FEFO_PRODUCTS: SeedProduct[] = [
+  {
+    sku: 'PC-DETTOL-125',
+    barcode: '8901234500059',
+    name: 'Dettol Antiseptic Liquid 125ml',
+    nameNepali: 'डेटोल एन्टिसेप्टिक १२५ मिलि',
+    category: 'Personal Care',
+    brand: 'Dettol',
+    reorderLevel: 96,
+    retailPricePerPcs: 115,
+    costPerPcs: 96,
+    units: units(12, 48),
+    batches: [
+      { batchNo: 'DT-EXP', expiresInDays: -10, qty: 24 }, // already expired
+      { batchNo: 'DT-A', expiresInDays: 20, qty: 48 },
+      { batchNo: 'DT-B', expiresInDays: 120, qty: 96 },
+      { batchNo: 'DT-C', expiresInDays: 400, qty: 144 },
+    ],
+  },
+  {
+    sku: 'FNB-HORLICKS-500',
+    barcode: '8901234500066',
+    name: 'Horlicks Classic Malt 500g Jar',
+    nameNepali: 'होर्लिक्स ५०० ग्राम',
+    category: 'Food & Beverage',
+    brand: 'Horlicks',
+    reorderLevel: 96, // stock 72 -> shows in the low-stock report
+    retailPricePerPcs: 520,
+    costPerPcs: 455,
+    units: units(6, 24),
+    batches: [
+      { batchNo: 'HL-A', expiresInDays: 45, qty: 24 },
+      { batchNo: 'HL-B', expiresInDays: 300, qty: 48 },
+    ],
+  },
+  {
+    sku: 'PC-COLGATE-100',
+    barcode: '8901234500073',
+    name: 'Colgate Strong Teeth 100g',
+    nameNepali: 'कोलगेट १०० ग्राम',
+    category: 'Personal Care',
+    brand: 'Colgate',
+    reorderLevel: 144,
+    retailPricePerPcs: 95,
+    costPerPcs: 80,
+    units: units(12, 144),
+    batches: [
+      { batchNo: 'CG-A', expiresInDays: 8, qty: 60 }, // expiring this week
+      { batchNo: 'CG-B', expiresInDays: 200, qty: 288 },
+    ],
+  },
+];
+
+interface SeedContext {
+  tenantId: string;
+  ownerId: string;
+  godownId: string;
+  tiers: { id: string; multiplier: number }[];
+  categoryId: (name: string) => Promise<string>;
+}
+
+async function createProduct(
+  tx: Prisma.TransactionClient,
+  ctx: SeedContext,
+  p: SeedProduct,
+) {
+  const { tenantId } = ctx;
+  const product = await tx.product.create({
+    data: {
+      tenantId,
+      sku: p.sku,
+      barcode: p.barcode,
+      name: p.name,
+      nameNepali: p.nameNepali,
+      categoryId: await ctx.categoryId(p.category),
+      brand: p.brand,
+      baseUnit: 'pcs',
+      trackBatch: !!p.batches,
+      reorderLevel: p.reorderLevel,
+    },
   });
-  if (existing) {
-    console.log(
-      `Seed skipped: tenant ${TENANT_CODE} already exists (${existing.id}).`,
-    );
-    return;
+
+  for (const u of p.units) {
+    const unit = await tx.productUnit.create({
+      data: { tenantId, productId: product.id, ...u },
+    });
+    for (const tier of ctx.tiers) {
+      const price =
+        p.retailPricePerPcs *
+        tier.multiplier *
+        u.factor *
+        UNIT_DISCOUNT[u.name];
+      await tx.productPrice.create({
+        data: {
+          tenantId,
+          productId: product.id,
+          unitId: unit.id,
+          priceTierId: tier.id,
+          price: price.toFixed(2),
+        },
+      });
+    }
   }
 
+  const opening = {
+    tenantId,
+    godownId: ctx.godownId,
+    productId: product.id,
+    type: MovementType.OPENING,
+    unitCost: new Prisma.Decimal(p.costPerPcs),
+    refType: 'OPENING',
+    refId: product.id,
+    createdById: ctx.ownerId,
+  };
+  const movements = [];
+  if (p.openingPcs) {
+    movements.push({ ...opening, quantity: new Prisma.Decimal(p.openingPcs) });
+  }
+  for (const b of p.batches ?? []) {
+    const expiry =
+      b.expiresInDays !== undefined
+        ? addDays(nepalToday(), b.expiresInDays)
+        : new Date(`${b.expiryDate}T00:00:00Z`);
+    const batch = await tx.batch.create({
+      data: {
+        tenantId,
+        productId: product.id,
+        batchNo: b.batchNo,
+        mfgDate: b.mfgDate ? new Date(`${b.mfgDate}T00:00:00Z`) : null,
+        expiryDate: expiry,
+        costPrice: p.costPerPcs,
+      },
+    });
+    movements.push({
+      ...opening,
+      batchId: batch.id,
+      quantity: new Prisma.Decimal(b.qty),
+    });
+  }
+  await stock.postMovements(tx, movements);
+}
+
+async function seedCore() {
   const [ownerHash, salesmanHash] = await Promise.all([
     bcrypt.hash('admin123', 10),
     bcrypt.hash('sales123', 10),
@@ -194,78 +319,8 @@ async function main() {
         tiers[t.name] = { id: tier.id, multiplier: t.multiplier };
       }
 
-      const categories: Record<string, string> = {};
-      for (const name of new Set(PRODUCTS.map((p) => p.category))) {
-        const category = await tx.category.create({ data: { tenantId, name } });
-        categories[name] = category.id;
-      }
-
-      for (const p of PRODUCTS) {
-        const product = await tx.product.create({
-          data: {
-            tenantId,
-            sku: p.sku,
-            barcode: p.barcode,
-            name: p.name,
-            nameNepali: p.nameNepali,
-            categoryId: categories[p.category],
-            brand: p.brand,
-            baseUnit: 'pcs',
-            trackBatch: p.trackBatch,
-            reorderLevel: p.reorderLevel,
-          },
-        });
-
-        for (const u of p.units) {
-          const unit = await tx.productUnit.create({
-            data: { tenantId, productId: product.id, ...u },
-          });
-          for (const tier of Object.values(tiers)) {
-            const price =
-              p.retailPricePerPcs *
-              tier.multiplier *
-              u.factor *
-              UNIT_DISCOUNT[u.name];
-            await tx.productPrice.create({
-              data: {
-                tenantId,
-                productId: product.id,
-                unitId: unit.id,
-                priceTierId: tier.id,
-                price: price.toFixed(2),
-              },
-            });
-          }
-        }
-
-        const batch = p.batch
-          ? await tx.batch.create({
-              data: {
-                tenantId,
-                productId: product.id,
-                batchNo: p.batch.batchNo,
-                mfgDate: new Date(p.batch.mfgDate),
-                expiryDate: new Date(p.batch.expiryDate),
-                costPrice: p.costPerPcs,
-              },
-            })
-          : null;
-
-        await tx.stockMovement.create({
-          data: {
-            tenantId,
-            godownId: mainGodown.id,
-            productId: product.id,
-            batchId: batch?.id,
-            type: MovementType.OPENING,
-            quantity: p.openingPcs,
-            unitCost: p.costPerPcs,
-            refType: 'OPENING',
-            refId: product.id,
-            createdById: owner.id,
-          },
-        });
-      }
+      const ctx = await buildContext(tx, tenantId, owner.id, mainGodown.id);
+      for (const p of CORE_PRODUCTS) await createProduct(tx, ctx, p);
 
       const beat = await tx.beat.create({
         data: {
@@ -332,6 +387,68 @@ async function main() {
     },
     { timeout: 60_000 },
   );
+}
+
+/** Adds any FEFO demo product that doesn't exist yet (safe to re-run). */
+async function seedBatchProducts(tenantId: string) {
+  await prisma.$transaction(
+    async (tx) => {
+      const [owner, godown] = await Promise.all([
+        tx.user.findFirstOrThrow({
+          where: { tenantId, role: UserRole.OWNER },
+          orderBy: { createdAt: 'asc' },
+        }),
+        tx.godown.findFirstOrThrow({
+          where: { tenantId, name: 'Main Godown' },
+        }),
+      ]);
+      const ctx = await buildContext(tx, tenantId, owner.id, godown.id);
+      for (const p of FEFO_PRODUCTS) {
+        const exists = await tx.product.findFirst({
+          where: { tenantId, sku: p.sku },
+        });
+        if (exists) continue;
+        await createProduct(tx, ctx, p);
+        console.log(
+          `Added batch-tracked product ${p.sku} (${p.batches!.length} batches).`,
+        );
+      }
+    },
+    { timeout: 60_000 },
+  );
+}
+
+async function buildContext(
+  tx: Prisma.TransactionClient,
+  tenantId: string,
+  ownerId: string,
+  godownId: string,
+): Promise<SeedContext> {
+  const tierRows = await tx.priceTier.findMany({ where: { tenantId } });
+  const tiers = TIERS.flatMap((t) => {
+    const row = tierRows.find((r) => r.name === t.name);
+    return row ? [{ id: row.id, multiplier: t.multiplier }] : [];
+  });
+  const categoryId = async (name: string) => {
+    const existing = await tx.category.findFirst({ where: { tenantId, name } });
+    return (
+      existing ?? (await tx.category.create({ data: { tenantId, name } }))
+    ).id;
+  };
+  return { tenantId, ownerId, godownId, tiers, categoryId };
+}
+
+async function main() {
+  let tenant = await prisma.tenant.findUnique({ where: { code: TENANT_CODE } });
+  if (tenant) {
+    console.log(`Core seed skipped: tenant ${TENANT_CODE} already exists.`);
+  } else {
+    await seedCore();
+    tenant = await prisma.tenant.findUniqueOrThrow({
+      where: { code: TENANT_CODE },
+    });
+  }
+  await seedBatchProducts(tenant.id);
 }
 
 main()

@@ -64,6 +64,12 @@ dispatch -> collection -> reports
 - Restrict routes by role with `@Roles(...)`.
 - Write an audit row with `AuditService.log(...)` inside the same transaction
   as the change it records. Never put passwords or tokens in audit values.
+- **`StockService` (`apps/api/src/stock/stock.service.ts`) is the ONLY code
+  allowed to create `StockMovement` rows.** Call `postMovements(tx, …)` inside
+  the caller's transaction; it takes a PostgreSQL advisory lock per
+  godown + product before any stock-out and refuses negative stock. Pick
+  batches with `allocateFEFO(…)` and undo documents with
+  `reverseMovements(…)`. Never insert, update or delete movements directly.
 - API docs: `http://localhost:4000/api/docs`.
 
 ## Nepal-Specific Requirements
