@@ -1,10 +1,15 @@
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module.js';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  // The web app's BFF calls the API and forwards the browser's IP in
+  // X-Forwarded-For. Trust it only from a proxy we control (default: same
+  // machine), so per-IP rate limits (e.g. 5 logins/minute) apply per browser.
+  app.set('trust proxy', process.env.TRUST_PROXY ?? 'loopback');
   // Every route lives under /api/v1 (e.g. /api/v1/auth/login). Swagger stays at /api/docs.
   app.setGlobalPrefix('api/v1');
 
