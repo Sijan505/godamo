@@ -95,6 +95,7 @@ enum AuditAction {
 
 model Tenant {
   id        String   @id @default(uuid())
+  code      String   @unique // company code typed at login, always UPPERCASE, e.g. "DEMO"
   name      String
   panVatNo  String?  @map("pan_vat_no")
   address   String?
@@ -127,21 +128,23 @@ model Tenant {
   ledgerEntries    LedgerEntry[]
   invoiceSequences InvoiceSequence[]
   auditLogs        AuditLog[]
+  refreshTokens    RefreshToken[]
 
   @@map("tenants")
 }
 
 model User {
-  id           String   @id @default(uuid())
-  tenantId     String   @map("tenant_id")
+  id           String    @id @default(uuid())
+  tenantId     String    @map("tenant_id")
   name         String
   phone        String
   email        String?
-  passwordHash String   @map("password_hash")
+  passwordHash String    @map("password_hash")
   role         UserRole
-  isActive     Boolean  @default(true) @map("is_active")
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
+  isActive     Boolean   @default(true) @map("is_active")
+  lastLoginAt  DateTime? @map("last_login_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
 
   tenant           Tenant          @relation(fields: [tenantId], references: [id])
   beats            Beat[]
@@ -152,9 +155,30 @@ model User {
   salesReturns     SalesReturn[]
   paymentsReceived Payment[]
   auditLogs        AuditLog[]
+  refreshTokens    RefreshToken[]
 
   @@unique([tenantId, phone])
   @@map("users")
+}
+
+// Only an HMAC of the refresh token is stored; the raw token lives on the client.
+// Rotated on every /auth/refresh: the old row gets revokedAt, a new row is created.
+model RefreshToken {
+  id        String    @id @default(uuid())
+  tenantId  String    @map("tenant_id")
+  userId    String    @map("user_id")
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  userAgent String?   @map("user_agent")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  user   User   @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([tenantId])
+  @@map("refresh_tokens")
 }
 
 model Godown {

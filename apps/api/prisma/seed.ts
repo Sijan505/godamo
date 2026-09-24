@@ -8,6 +8,7 @@ import {
   UserRole,
 } from '../src/generated/prisma/client.js';
 
+const TENANT_CODE = 'DEMO';
 const TENANT_NAME = 'Demo Distributors Pvt. Ltd.';
 
 const prisma = new PrismaClient({
@@ -21,7 +22,11 @@ const TIERS = [
   { name: 'Bulk', multiplier: 0.95 },
 ] as const;
 
-const UNIT_DISCOUNT: Record<string, number> = { pcs: 1, box: 0.99, carton: 0.98 };
+const UNIT_DISCOUNT: Record<string, number> = {
+  pcs: 1,
+  box: 0.99,
+  carton: 0.98,
+};
 
 const PRODUCTS = [
   {
@@ -36,9 +41,24 @@ const PRODUCTS = [
     retailPricePerPcs: 25,
     costPerPcs: 21.5,
     units: [
-      { name: 'pcs', factor: 1, isDefaultSale: false, isDefaultPurchase: false },
-      { name: 'box', factor: 30, isDefaultSale: true, isDefaultPurchase: false },
-      { name: 'carton', factor: 120, isDefaultSale: false, isDefaultPurchase: true },
+      {
+        name: 'pcs',
+        factor: 1,
+        isDefaultSale: false,
+        isDefaultPurchase: false,
+      },
+      {
+        name: 'box',
+        factor: 30,
+        isDefaultSale: true,
+        isDefaultPurchase: false,
+      },
+      {
+        name: 'carton',
+        factor: 120,
+        isDefaultSale: false,
+        isDefaultPurchase: true,
+      },
     ],
     openingPcs: 6000, // 50 cartons
   },
@@ -54,9 +74,19 @@ const PRODUCTS = [
     retailPricePerPcs: 50,
     costPerPcs: 42,
     units: [
-      { name: 'pcs', factor: 1, isDefaultSale: false, isDefaultPurchase: false },
+      {
+        name: 'pcs',
+        factor: 1,
+        isDefaultSale: false,
+        isDefaultPurchase: false,
+      },
       { name: 'box', factor: 6, isDefaultSale: true, isDefaultPurchase: false },
-      { name: 'carton', factor: 24, isDefaultSale: false, isDefaultPurchase: true },
+      {
+        name: 'carton',
+        factor: 24,
+        isDefaultSale: false,
+        isDefaultPurchase: true,
+      },
     ],
     openingPcs: 2400, // 100 cartons
   },
@@ -72,19 +102,42 @@ const PRODUCTS = [
     retailPricePerPcs: 55,
     costPerPcs: 46.25,
     units: [
-      { name: 'pcs', factor: 1, isDefaultSale: false, isDefaultPurchase: false },
-      { name: 'box', factor: 12, isDefaultSale: true, isDefaultPurchase: false },
-      { name: 'carton', factor: 144, isDefaultSale: false, isDefaultPurchase: true },
+      {
+        name: 'pcs',
+        factor: 1,
+        isDefaultSale: false,
+        isDefaultPurchase: false,
+      },
+      {
+        name: 'box',
+        factor: 12,
+        isDefaultSale: true,
+        isDefaultPurchase: false,
+      },
+      {
+        name: 'carton',
+        factor: 144,
+        isDefaultSale: false,
+        isDefaultPurchase: true,
+      },
     ],
     openingPcs: 1440, // 10 cartons
-    batch: { batchNo: 'LB-2083-01', mfgDate: '2026-08-01', expiryDate: '2028-07-31' },
+    batch: {
+      batchNo: 'LB-2083-01',
+      mfgDate: '2026-08-01',
+      expiryDate: '2028-07-31',
+    },
   },
 ];
 
 async function main() {
-  const existing = await prisma.tenant.findFirst({ where: { name: TENANT_NAME } });
+  const existing = await prisma.tenant.findUnique({
+    where: { code: TENANT_CODE },
+  });
   if (existing) {
-    console.log(`Seed skipped: tenant "${TENANT_NAME}" already exists (${existing.id}).`);
+    console.log(
+      `Seed skipped: tenant ${TENANT_CODE} already exists (${existing.id}).`,
+    );
     return;
   }
 
@@ -97,6 +150,7 @@ async function main() {
     async (tx) => {
       const tenant = await tx.tenant.create({
         data: {
+          code: TENANT_CODE,
           name: TENANT_NAME,
           panVatNo: '600000001',
           address: 'Kalimati, Kathmandu',
@@ -134,7 +188,9 @@ async function main() {
 
       const tiers: Record<string, { id: string; multiplier: number }> = {};
       for (const t of TIERS) {
-        const tier = await tx.priceTier.create({ data: { tenantId, name: t.name } });
+        const tier = await tx.priceTier.create({
+          data: { tenantId, name: t.name },
+        });
         tiers[t.name] = { id: tier.id, multiplier: t.multiplier };
       }
 
@@ -165,7 +221,11 @@ async function main() {
             data: { tenantId, productId: product.id, ...u },
           });
           for (const tier of Object.values(tiers)) {
-            const price = p.retailPricePerPcs * tier.multiplier * u.factor * UNIT_DISCOUNT[u.name];
+            const price =
+              p.retailPricePerPcs *
+              tier.multiplier *
+              u.factor *
+              UNIT_DISCOUNT[u.name];
             await tx.productPrice.create({
               data: {
                 tenantId,
@@ -208,7 +268,12 @@ async function main() {
       }
 
       const beat = await tx.beat.create({
-        data: { tenantId, name: 'Kalimati - Kuleshwor', dayOfWeek: 0, salesmanId: salesman.id },
+        data: {
+          tenantId,
+          name: 'Kalimati - Kuleshwor',
+          dayOfWeek: 0,
+          salesmanId: salesman.id,
+        },
       });
 
       await tx.party.createMany({

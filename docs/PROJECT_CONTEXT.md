@@ -53,6 +53,18 @@ dispatch -> collection -> reports
 8. **Every table has a `tenant_id`** for multi-tenant isolation.
 9. **Every change is written to an audit log.**
 10. **Batch and expiry tracking** with first-expiry-first-out (FEFO) picking.
+11. **`tenantId` always comes from the access token**, never from the request
+    body, params or query. Read it with `@CurrentUser()` and filter every
+    query by it. A record id that belongs to another tenant must behave as if
+    it does not exist (404).
+
+## API Conventions (apps/api)
+
+- Every route requires a valid access token unless marked `@Public()`.
+- Restrict routes by role with `@Roles(...)`.
+- Write an audit row with `AuditService.log(...)` inside the same transaction
+  as the change it records. Never put passwords or tokens in audit values.
+- API docs: `http://localhost:4000/api/docs`.
 
 ## Nepal-Specific Requirements
 
