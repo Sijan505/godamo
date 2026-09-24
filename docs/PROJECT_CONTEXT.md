@@ -74,6 +74,7 @@ dispatch -> collection -> reports
   godown + product before any stock-out and refuses negative stock. Pick
   batches with `allocateFEFO(…)` and undo documents with
   `reverseMovements(…)`. Never insert, update or delete movements directly.
+- All API routes are under `/api/v1` (e.g. `http://localhost:4000/api/v1/auth/login`).
 - API docs: `http://localhost:4000/api/docs`.
 
 ## Nepal-Specific Requirements

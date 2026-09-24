@@ -7,6 +7,7 @@ import { AuditModule } from './audit/audit.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { CategoriesModule } from './categories/categories.module.js';
 import { CreditModule } from './credit/credit.module.js';
+import { DashboardModule } from './dashboard/dashboard.module.js';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard.js';
 import { RolesGuard } from './common/guards/roles.guard.js';
 import { validateEnv } from './config/env.validation.js';
@@ -50,6 +51,7 @@ import { UsersModule } from './users/users.module.js';
     HandoversModule,
     PartyAccountsModule,
     ReportsModule,
+    DashboardModule,
   ],
   controllers: [HealthController],
   providers: [
