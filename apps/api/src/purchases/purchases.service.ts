@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service.js';
+import { calculateBill } from '../common/billing/bill-totals.js';
 import { dateOnly, nepalToday } from '../common/dates.js';
 import { pageArgs } from '../common/pagination.js';
 import { isUniqueViolation } from '../common/prisma-errors.js';
@@ -25,7 +26,7 @@ import {
   InsufficientStockException,
   StockService,
 } from '../stock/stock.service.js';
-import { calculatePurchase } from './purchase-totals.js';
+
 import type {
   CreatePurchaseDto,
   ListPurchasesQueryDto,
@@ -141,9 +142,9 @@ export class PurchasesService {
       };
     });
 
-    let totals: ReturnType<typeof calculatePurchase>;
+    let totals: ReturnType<typeof calculateBill>;
     try {
-      totals = calculatePurchase(
+      totals = calculateBill(
         lines.map(({ item, product }) => ({
           quantity: new Decimal(item.quantity),
           rate: new Decimal(item.rate),

@@ -1,4 +1,4 @@
-import { Prisma } from '../generated/prisma/client.js';
+import { Prisma } from '../../generated/prisma/client.js';
 
 type Decimal = Prisma.Decimal;
 const { Decimal } = Prisma;
@@ -6,7 +6,7 @@ const { Decimal } = Prisma;
 export const VAT_RATE = new Decimal('0.13');
 const round2 = (d: Decimal) => d.toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
 
-export interface PurchaseLineInput {
+export interface BillLineInput {
   quantity: Decimal;
   rate: Decimal;
   /** Line discount as an amount (not %). */
@@ -14,7 +14,7 @@ export interface PurchaseLineInput {
   vatApplicable: boolean;
 }
 
-export interface PurchaseLineTotals {
+export interface BillLineTotals {
   /** quantity × rate − line discount, before VAT. */
   amount: Decimal;
   /** This line's share of the bill discount. */
@@ -24,26 +24,30 @@ export interface PurchaseLineTotals {
   vatAmount: Decimal;
 }
 
-export interface PurchaseTotals {
-  lines: PurchaseLineTotals[];
+export interface BillTotals {
+  lines: BillLineTotals[];
   subtotal: Decimal;
   discount: Decimal;
+  /** Discounted value of VAT-applicable lines (what VAT is charged on). */
+  taxableAmount: Decimal;
+  /** Discounted value of VAT-exempt lines. */
+  exemptAmount: Decimal;
   vatAmount: Decimal;
   total: Decimal;
 }
 
 /**
- * Purchase bill maths. All amounts are rounded to 2 decimals (half up).
+ * Bill maths for purchases, orders and invoices. All amounts are rounded to 2 decimals (half up).
  * - subtotal = Σ line amounts
  * - the bill discount is spread over lines in proportion to their amount
  * - VAT (13%) is charged on the discounted amount of VAT-applicable lines only,
  *   computed on their combined taxable value like the supplier's bill
  * - total = subtotal − discount + VAT
  */
-export function calculatePurchase(
-  lines: PurchaseLineInput[],
+export function calculateBill(
+  lines: BillLineInput[],
   billDiscount: Decimal,
-): PurchaseTotals {
+): BillTotals {
   const amounts = lines.map((l, i) => {
     const gross = l.quantity.mul(l.rate);
     if (l.discount.gt(gross)) {
@@ -99,6 +103,8 @@ export function calculatePurchase(
     })),
     subtotal,
     discount: billDiscount,
+    taxableAmount: vatableTotal,
+    exemptAmount: subtotal.minus(billDiscount).minus(vatableTotal),
     vatAmount,
     total: subtotal.minus(billDiscount).plus(vatAmount),
   };

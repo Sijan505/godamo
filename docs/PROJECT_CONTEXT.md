@@ -57,6 +57,10 @@ dispatch -> collection -> reports
     body, params or query. Read it with `@CurrentUser()` and filter every
     query by it. A record id that belongs to another tenant must behave as if
     it does not exist (404).
+12. **The server ALWAYS calculates prices, VAT and totals.** Clients send only
+    what is sold (product, unit, quantity, discount %); rates come from
+    `PricingService` and amounts from the shared bill maths. Never trust
+    prices or totals sent by a client.
 
 ## API Conventions (apps/api)
 
@@ -76,7 +80,16 @@ dispatch -> collection -> reports
 
 - VAT at 13%
 - IRD-compliant invoices
+  - Invoices are never deleted; cancelling keeps the number. Numbers are
+    gap-free per tenant and fiscal year (starts Shrawan 1, e.g. "2083/84").
+  - First print is the original; later prints say "COPY OF ORIGINAL - Print #n".
+  - **TODO before production:** verify every invoice field, the PDF layout,
+    the cancellation/credit-note flow and real-time sync with the IRD Central
+    Billing Monitoring System (CBMS) against the current IRD billing-software
+    rules, and get the software approved.
 - Both BS (Bikram Sambat) and AD (Gregorian) dates supported
+  - AD <-> BS uses `nepali-date-converter`, whose data ends at BS 2090
+    (~2034 AD); update or replace it before then.
 - Nepali and English language support
 - Payment methods: cash, cheque, bank transfer, Fonepay, eSewa, Khalti
 

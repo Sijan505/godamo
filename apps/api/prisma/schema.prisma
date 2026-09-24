@@ -94,6 +94,19 @@ enum StockCountStatus {
   APPLIED // ADJUSTMENT movements posted
 }
 
+enum DocType {
+  INVOICE
+  SALES_ORDER
+  SALES_RETURN
+}
+
+enum CreditApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  USED
+}
+
 enum AuditAction {
   CREATE
   UPDATE
@@ -136,7 +149,8 @@ model Tenant {
   salesReturnItems SalesReturnItem[]
   payments         Payment[]
   ledgerEntries    LedgerEntry[]
-  invoiceSequences InvoiceSequence[]
+  docSequences     DocSequence[]
+  creditApprovals  CreditApproval[]
   auditLogs        AuditLog[]
   refreshTokens    RefreshToken[]
   stockTransfers   StockTransfer[]
@@ -165,7 +179,10 @@ model User {
   stockMovements     StockMovement[]
   purchases          Purchase[]        @relation("PurchaseCreatedBy")
   salesOrders        SalesOrder[]
-  invoices           Invoice[]
+  invoices           Invoice[]         @relation("InvoiceCreatedBy")
+  invoicesCancelled  Invoice[]         @relation("InvoiceCancelledBy")
+  creditRequests     CreditApproval[]  @relation("CreditRequestedBy")
+  creditDecisions    CreditApproval[]  @relation("CreditDecidedBy")
   salesReturns       SalesReturn[]
   paymentsReceived   Payment[]
   auditLogs          AuditLog[]
@@ -380,16 +397,17 @@ model Party {
   updatedAt   DateTime  @updatedAt @map("updated_at")
   // No balance column: balance = SUM(debit) - SUM(credit) over ledger_entries.
 
-  tenant        Tenant        @relation(fields: [tenantId], references: [id])
-  priceTier     PriceTier?    @relation(fields: [priceTierId], references: [id])
-  beat          Beat?         @relation(fields: [beatId], references: [id])
-  partyPrices   PartyPrice[]
-  purchases     Purchase[]
-  salesOrders   SalesOrder[]
-  invoices      Invoice[]
-  salesReturns  SalesReturn[]
-  payments      Payment[]
-  ledgerEntries LedgerEntry[]
+  tenant          Tenant           @relation(fields: [tenantId], references: [id])
+  priceTier       PriceTier?       @relation(fields: [priceTierId], references: [id])
+  beat            Beat?            @relation(fields: [beatId], references: [id])
+  partyPrices     PartyPrice[]
+  purchases       Purchase[]
+  salesOrders     SalesOrder[]
+  invoices        Invoice[]
+  salesReturns    SalesReturn[]
+  payments        Payment[]
+  ledgerEntries   LedgerEntry[]
+  creditApprovals CreditApproval[]
 
   @@index([tenantId, type])
   @@index([tenantId, beatId])
@@ -622,18 +640,23 @@ model PurchaseItem {
 // ─── Sales ──────────────────────────────────────────────────────────────────
 
 model SalesOrder {
-  id         String      @id @default(uuid())
-  tenantId   String      @map("tenant_id")
-  orderNo    String      @map("order_no")
-  partyId    String      @map("party_id")
-  salesmanId String      @map("salesman_id")
-  godownId   String      @map("godown_id")
-  orderDate  DateTime    @map("order_date") @db.Date
-  status     OrderStatus @default(DRAFT)
-  notes      String?
-  clientUuid String?     @unique @map("client_uuid")
-  createdAt  DateTime    @default(now()) @map("created_at")
-  updatedAt  DateTime    @updatedAt @map("updated_at")
+  id           String      @id @default(uuid())
+  tenantId     String      @map("tenant_id")
+  orderNo      String      @map("order_no")
+  partyId      String      @map("party_id")
+  salesmanId   String      @map("salesman_id")
+  godownId     String      @map("godown_id")
+  orderDate    DateTime    @map("order_date") @db.Date
+  status       OrderStatus @default(DRAFT)
+  notes        String?
+  subtotal     Decimal     @default(0) @db.Decimal(14, 2) // estimate at order time
+  discount     Decimal     @default(0) @db.Decimal(14, 2)
+  vatAmount    Decimal     @default(0) @map("vat_amount") @db.Decimal(14, 2)
+  total        Decimal     @default(0) @db.Decimal(14, 2)
+  cancelReason String?     @map("cancel_reason")
+  clientUuid   String?     @unique @map("client_uuid")
+  createdAt    DateTime    @default(now()) @map("created_at")
+  updatedAt    DateTime    @updatedAt @map("updated_at")
 
   tenant   Tenant           @relation(fields: [tenantId], references: [id])
   party    Party            @relation(fields: [partyId], references: [id])
@@ -650,19 +673,22 @@ model SalesOrder {
 }
 
 model SalesOrderItem {
-  id            String   @id @default(uuid())
-  tenantId      String   @map("tenant_id")
-  orderId       String   @map("order_id")
-  productId     String   @map("product_id")
-  unitId        String   @map("unit_id")
-  quantity      Decimal  @db.Decimal(14, 3) // in the chosen unit
-  baseQuantity  Decimal  @map("base_quantity") @db.Decimal(14, 3)
-  rate          Decimal  @db.Decimal(14, 2)
-  discount      Decimal  @default(0) @db.Decimal(14, 2)
-  schemeFreeQty Decimal  @default(0) @map("scheme_free_qty") @db.Decimal(14, 3) // in the chosen unit
-  amount        Decimal  @db.Decimal(14, 2)
-  createdAt     DateTime @default(now()) @map("created_at")
-  updatedAt     DateTime @updatedAt @map("updated_at")
+  id              String   @id @default(uuid())
+  tenantId        String   @map("tenant_id")
+  orderId         String   @map("order_id")
+  productId       String   @map("product_id")
+  unitId          String   @map("unit_id")
+  quantity        Decimal  @db.Decimal(14, 3) // in the chosen unit
+  baseQuantity    Decimal  @map("base_quantity") @db.Decimal(14, 3)
+  rate            Decimal  @db.Decimal(14, 2)
+  discountPercent Decimal  @default(0) @map("discount_percent") @db.Decimal(5, 2)
+  discount        Decimal  @default(0) @db.Decimal(14, 2) // amount = quantity x rate x discountPercent
+  vatAmount       Decimal  @default(0) @map("vat_amount") @db.Decimal(14, 2)
+  priceSource     String?  @map("price_source") // SPECIAL | TIER | DERIVED
+  schemeFreeQty   Decimal  @default(0) @map("scheme_free_qty") @db.Decimal(14, 3) // in the chosen unit
+  amount          Decimal  @db.Decimal(14, 2)
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
 
   tenant  Tenant      @relation(fields: [tenantId], references: [id])
   order   SalesOrder  @relation(fields: [orderId], references: [id])
@@ -691,18 +717,22 @@ model Invoice {
   total         Decimal       @db.Decimal(14, 2)
   status        InvoiceStatus @default(ISSUED)
   cancelReason  String?       @map("cancel_reason")
+  cancelledAt   DateTime?     @map("cancelled_at")
+  cancelledById String?       @map("cancelled_by_id")
   printCount    Int           @default(0) @map("print_count")
   createdById   String        @map("created_by_id")
   createdAt     DateTime      @default(now()) @map("created_at")
   updatedAt     DateTime      @updatedAt @map("updated_at")
 
-  tenant       Tenant        @relation(fields: [tenantId], references: [id])
-  party        Party         @relation(fields: [partyId], references: [id])
-  order        SalesOrder?   @relation(fields: [orderId], references: [id])
-  godown       Godown        @relation(fields: [godownId], references: [id])
-  createdBy    User          @relation(fields: [createdById], references: [id])
-  items        InvoiceItem[]
-  salesReturns SalesReturn[]
+  tenant         Tenant          @relation(fields: [tenantId], references: [id])
+  party          Party           @relation(fields: [partyId], references: [id])
+  order          SalesOrder?     @relation(fields: [orderId], references: [id])
+  godown         Godown          @relation(fields: [godownId], references: [id])
+  createdBy      User            @relation("InvoiceCreatedBy", fields: [createdById], references: [id])
+  cancelledBy    User?           @relation("InvoiceCancelledBy", fields: [cancelledById], references: [id])
+  items          InvoiceItem[]
+  salesReturns   SalesReturn[]
+  creditApproval CreditApproval?
 
   @@unique([tenantId, fiscalYear, invoiceNo])
   @@index([tenantId, partyId])
@@ -712,20 +742,23 @@ model Invoice {
 }
 
 model InvoiceItem {
-  id           String   @id @default(uuid())
-  tenantId     String   @map("tenant_id")
-  invoiceId    String   @map("invoice_id")
-  productId    String   @map("product_id")
-  unitId       String   @map("unit_id")
-  batchId      String?  @map("batch_id")
-  quantity     Decimal  @db.Decimal(14, 3) // in the chosen unit
-  baseQuantity Decimal  @map("base_quantity") @db.Decimal(14, 3)
-  rate         Decimal  @db.Decimal(14, 2)
-  discount     Decimal  @default(0) @db.Decimal(14, 2)
-  vatAmount    Decimal  @default(0) @map("vat_amount") @db.Decimal(14, 2)
-  amount       Decimal  @db.Decimal(14, 2)
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
+  id              String   @id @default(uuid())
+  tenantId        String   @map("tenant_id")
+  invoiceId       String   @map("invoice_id")
+  lineNo          Int      @default(1) @map("line_no") // a line split over batches keeps one lineNo
+  productId       String   @map("product_id")
+  unitId          String   @map("unit_id")
+  batchId         String?  @map("batch_id")
+  quantity        Decimal  @db.Decimal(14, 3) // in the chosen unit
+  baseQuantity    Decimal  @map("base_quantity") @db.Decimal(14, 3)
+  rate            Decimal  @db.Decimal(14, 2)
+  discountPercent Decimal  @default(0) @map("discount_percent") @db.Decimal(5, 2)
+  discount        Decimal  @default(0) @db.Decimal(14, 2)
+  priceSource     String?  @map("price_source")
+  vatAmount       Decimal  @default(0) @map("vat_amount") @db.Decimal(14, 2)
+  amount          Decimal  @db.Decimal(14, 2)
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
 
   tenant  Tenant      @relation(fields: [tenantId], references: [id])
   invoice Invoice     @relation(fields: [invoiceId], references: [id])
@@ -851,9 +884,13 @@ model LedgerEntry {
   @@map("ledger_entries")
 }
 
-model InvoiceSequence {
+// Gap-free document numbers per tenant, document type and fiscal year.
+// Incremented with INSERT ... ON CONFLICT DO UPDATE ... RETURNING inside the
+// document's transaction (see src/common/numbering).
+model DocSequence {
   id         String   @id @default(uuid())
   tenantId   String   @map("tenant_id")
+  docType    DocType  @map("doc_type")
   fiscalYear String   @map("fiscal_year")
   lastNumber Int      @default(0) @map("last_number")
   createdAt  DateTime @default(now()) @map("created_at")
@@ -861,8 +898,37 @@ model InvoiceSequence {
 
   tenant Tenant @relation(fields: [tenantId], references: [id])
 
-  @@unique([tenantId, fiscalYear])
-  @@map("invoice_sequences")
+  @@unique([tenantId, docType, fiscalYear])
+  @@map("doc_sequences")
+}
+
+// Owner/manager permission to bill ONE invoice (up to `amount`) past the
+// party's credit limit, valid until the end of the Nepal day it was requested.
+model CreditApproval {
+  id              String               @id @default(uuid())
+  tenantId        String               @map("tenant_id")
+  partyId         String               @map("party_id")
+  amount          Decimal              @db.Decimal(14, 2)
+  reason          String
+  status          CreditApprovalStatus @default(PENDING)
+  requestedById   String               @map("requested_by_id")
+  approvedById    String?              @map("approved_by_id") // who approved or rejected
+  decidedAt       DateTime?            @map("decided_at")
+  decisionNote    String?              @map("decision_note")
+  expiresAt       DateTime             @map("expires_at")
+  usedByInvoiceId String?              @unique @map("used_by_invoice_id")
+  createdAt       DateTime             @default(now()) @map("created_at")
+  updatedAt       DateTime             @updatedAt @map("updated_at")
+
+  tenant        Tenant   @relation(fields: [tenantId], references: [id])
+  party         Party    @relation(fields: [partyId], references: [id])
+  requestedBy   User     @relation("CreditRequestedBy", fields: [requestedById], references: [id])
+  approvedBy    User?    @relation("CreditDecidedBy", fields: [approvedById], references: [id])
+  usedByInvoice Invoice? @relation(fields: [usedByInvoiceId], references: [id])
+
+  @@index([tenantId, status])
+  @@index([tenantId, partyId])
+  @@map("credit_approvals")
 }
 
 // ─── Audit ──────────────────────────────────────────────────────────────────
