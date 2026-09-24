@@ -1,9 +1,10 @@
+import type { OutstandingService } from '../accounts/outstanding.service.js';
 import type { AuditService } from '../audit/audit.service.js';
 import { calculateBill } from '../common/billing/bill-totals.js';
 import type { AuthUser } from '../common/types/auth-user.js';
 import { evaluateCredit } from '../credit/credit-rules.js';
 import {
-  CreditLimitExceededException,
+  CreditBlockedException,
   type CreditService,
 } from '../credit/credit.service.js';
 import {
@@ -91,6 +92,13 @@ function setup(balance: number) {
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
     salesOrder: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+    paymentAllocation: {
+      // A Rs 1000 receipt was applied to the invoice before it was cancelled.
+      groupBy: vi
+        .fn()
+        .mockResolvedValue([{ paymentId: 'pay-1', _sum: { amount: D(1000) } }]),
+      createMany: vi.fn(),
+    },
   };
   tx.$queryRaw.mockImplementation((strings: TemplateStringsArray) =>
     Promise.resolve(
@@ -148,6 +156,9 @@ function setup(balance: number) {
     {
       getActive: vi.fn().mockResolvedValue({ id: 'main' }),
     } as unknown as GodownsService,
+    {
+      paymentInfo: vi.fn().mockResolvedValue(new Map()),
+    } as unknown as OutstandingService,
   );
   return { service, tx, stock, credit, ledger };
 }
@@ -225,8 +236,8 @@ describe('InvoicesService.create', () => {
   it('blocks a party over its credit limit with numbers for the UI', async () => {
     const { service, stock, tx } = setup(48000); // 48000 + 3683.80 > 50000
     const attempt = service.create(actor, dto);
-    await expect(attempt).rejects.toThrow(CreditLimitExceededException);
-    await attempt.catch((e: CreditLimitExceededException) =>
+    await expect(attempt).rejects.toThrow(CreditBlockedException);
+    await attempt.catch((e: CreditBlockedException) =>
       expect(e.getResponse()).toMatchObject({
         code: 'CREDIT_LIMIT_EXCEEDED',
         balance: '48000.00',
@@ -299,6 +310,17 @@ describe('InvoicesService.cancel', () => {
       'inv-1',
       'office-1',
     );
+    // The payment applied to it is released as advance (a negative row).
+    expect(tx.paymentAllocation.createMany).toHaveBeenCalledWith({
+      data: [
+        {
+          tenantId: 't1',
+          paymentId: 'pay-1',
+          invoiceId: 'inv-1',
+          amount: D(-1000),
+        },
+      ],
+    });
     expect(ledger.post).toHaveBeenCalledWith(
       tx,
       expect.objectContaining({

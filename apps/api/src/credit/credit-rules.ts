@@ -9,30 +9,61 @@ type Decimal = Prisma.Decimal;
 /** Managers may decide approvals strictly below this amount; above it only the owner. */
 export const MANAGER_APPROVAL_LIMIT = new Prisma.Decimal(50_000);
 
+export type CreditBlockCode = 'CREDIT_LIMIT_EXCEEDED' | 'OVERDUE_INVOICES';
+
+export interface OverdueInvoiceSummary {
+  invoiceId: string;
+  invoiceNo: number;
+  fiscalYear: string;
+  invoiceDate: Date;
+  dueDate: Date;
+  daysOverdue: number;
+  outstanding: Decimal;
+}
+
 export interface CreditDecision {
   allowed: boolean;
+  /** Why billing is blocked (overdue bills are reported first), or null. */
+  code: CreditBlockCode | null;
+  limitExceeded: boolean;
   balance: Decimal;
   creditLimit: Decimal;
   amount: Decimal;
   newBalance: Decimal;
+  /** Invoices overdue beyond the grace period (only when they block). */
+  overdueInvoices: OverdueInvoiceSummary[];
 }
 
 /**
  * Billing `amount` is allowed while balance + amount stays within the credit
- * limit. A limit of 0 means cash only: any positive balance is blocked.
+ * limit (a limit of 0 means cash only: any positive balance is blocked) and,
+ * when `blockOnOverdue` is on, the party has no bill overdue past the grace
+ * period. A credit approval can override either block.
  */
 export function evaluateCredit(
   balance: Decimal,
   creditLimit: Decimal,
   amount: Decimal,
+  overdueInvoices: OverdueInvoiceSummary[] = [],
+  blockOnOverdue = false,
 ): CreditDecision {
   const newBalance = balance.plus(amount);
+  const limitExceeded = newBalance.gt(creditLimit);
+  const overdueBlocks = blockOnOverdue && overdueInvoices.length > 0;
+  const code: CreditBlockCode | null = overdueBlocks
+    ? 'OVERDUE_INVOICES'
+    : limitExceeded
+      ? 'CREDIT_LIMIT_EXCEEDED'
+      : null;
   return {
-    allowed: newBalance.lte(creditLimit),
+    allowed: code === null,
+    code,
+    limitExceeded,
     balance,
     creditLimit,
     amount,
     newBalance,
+    overdueInvoices: overdueBlocks ? overdueInvoices : [],
   };
 }
 

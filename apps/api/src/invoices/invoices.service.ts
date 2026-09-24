@@ -5,14 +5,15 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
+import { OutstandingService } from '../accounts/outstanding.service.js';
 import { AuditService } from '../audit/audit.service.js';
-import { dateOnly, nepalToday } from '../common/dates.js';
+import { nepalToday, nepalTodayString } from '../common/dates.js';
 import { getFiscalYear } from '../common/nepali-date/nepali-date.js';
 import { nextInvoiceNo } from '../common/numbering/numbering.js';
 import { pageArgs } from '../common/pagination.js';
 import type { AuthUser } from '../common/types/auth-user.js';
 import {
-  CreditLimitExceededException,
+  CreditBlockedException,
   CreditService,
 } from '../credit/credit.service.js';
 import {
@@ -45,10 +46,26 @@ export const INVOICE_DETAIL_INCLUDE = {
       address: true,
       panVatNo: true,
       phone: true,
+      creditDays: true,
     },
   },
   godown: { select: { id: true, name: true } },
   order: { select: { id: true, orderNo: true } },
+  allocations: {
+    include: {
+      payment: {
+        select: {
+          id: true,
+          fiscalYear: true,
+          receiptNo: true,
+          paymentDate: true,
+          method: true,
+          status: true,
+        },
+      },
+    },
+    orderBy: { createdAt: 'asc' },
+  },
   createdBy: { select: { id: true, name: true } },
   cancelledBy: { select: { id: true, name: true } },
   creditApproval: { select: { id: true, amount: true, approvedById: true } },
@@ -72,40 +89,74 @@ export class InvoicesService {
     private readonly ledger: LedgerService,
     private readonly credit: CreditService,
     private readonly godowns: GodownsService,
+    private readonly outstanding: OutstandingService,
   ) {}
 
+  /**
+   * Lists invoices with payment status. `unpaid` / `overdue` filter on derived
+   * values (total - allocations, invoice date + credit days), so ids are
+   * selected in SQL first.
+   */
   async list(actor: AuthUser, q: ListInvoicesQueryDto) {
-    const where: Prisma.InvoiceWhereInput = {
-      tenantId: actor.tenantId,
-      partyId: q.partyId,
-      status: q.status,
-      fiscalYear: q.fiscalYear,
-      ...((q.from || q.to) && {
-        invoiceDate: {
-          ...(q.from && { gte: dateOnly(q.from) }),
-          ...(q.to && { lte: dateOnly(q.to) }),
-        },
-      }),
-    };
-    const [items, total] = await Promise.all([
-      this.prisma.invoice.findMany({
-        where,
-        include: { party: { select: { id: true, name: true } } },
-        orderBy: [{ fiscalYear: 'desc' }, { invoiceNo: 'desc' }],
-        ...pageArgs(q),
-      }),
-      this.prisma.invoice.count({ where }),
+    const conds: Prisma.Sql[] = [Prisma.sql`i.tenant_id = ${actor.tenantId}`];
+    if (q.partyId) conds.push(Prisma.sql`i.party_id = ${q.partyId}`);
+    if (q.status)
+      conds.push(Prisma.sql`i.status = ${q.status}::"InvoiceStatus"`);
+    if (q.fiscalYear) conds.push(Prisma.sql`i.fiscal_year = ${q.fiscalYear}`);
+    if (q.from) conds.push(Prisma.sql`i.invoice_date >= ${q.from}::date`);
+    if (q.to) conds.push(Prisma.sql`i.invoice_date <= ${q.to}::date`);
+    if (q.unpaid || q.overdue) {
+      conds.push(
+        Prisma.sql`i.status = 'ISSUED' AND i.total - COALESCE(a.paid, 0) > 0`,
+      );
+    }
+    if (q.overdue) {
+      conds.push(
+        Prisma.sql`i.invoice_date + p.credit_days < ${nepalTodayString()}::date`,
+      );
+    }
+    const from = Prisma.sql`
+      FROM invoices i
+      JOIN parties p ON p.id = i.party_id
+      LEFT JOIN (
+        SELECT invoice_id, SUM(amount) AS paid FROM payment_allocations
+        WHERE tenant_id = ${actor.tenantId} GROUP BY invoice_id
+      ) a ON a.invoice_id = i.id
+      WHERE ${Prisma.join(conds, ' AND ')}`;
+    const { skip, take } = pageArgs(q);
+    const [idRows, countRows] = await Promise.all([
+      this.prisma.$queryRaw<{ id: string }[]>`
+        SELECT i.id ${from}
+        ORDER BY i.fiscal_year DESC, i.invoice_no DESC
+        LIMIT ${take} OFFSET ${skip}`,
+      this.prisma.$queryRaw<{ n: bigint }[]>`SELECT COUNT(*) AS n ${from}`,
     ]);
-    return { items, total, page: q.page, limit: q.limit };
+    const ids = idRows.map((r) => r.id);
+    const invoices = await this.prisma.invoice.findMany({
+      where: { id: { in: ids } },
+      include: {
+        party: { select: { id: true, name: true, creditDays: true } },
+      },
+    });
+    const byId = new Map(invoices.map((i) => [i.id, i]));
+    const info = await this.outstanding.paymentInfo(this.prisma, invoices);
+    return {
+      items: ids.map((id) => ({ ...byId.get(id)!, ...info.get(id)! })),
+      total: Number(countRows[0].n),
+      page: q.page,
+      limit: q.limit,
+    };
   }
 
+  /** Invoice with items, payments applied, outstanding, due date and overdue flag. */
   async findOne(actor: AuthUser, id: string) {
     const invoice = await this.prisma.invoice.findFirst({
       where: { id, tenantId: actor.tenantId },
       include: INVOICE_DETAIL_INCLUDE,
     });
     if (!invoice) throw new NotFoundException('Invoice not found');
-    return invoice;
+    const info = await this.outstanding.paymentInfo(this.prisma, [invoice]);
+    return { ...invoice, ...info.get(invoice.id)! };
   }
 
   /**
@@ -153,7 +204,7 @@ export class InvoicesService {
         );
         if (!decision.allowed) {
           if (!dto.creditApprovalId) {
-            throw new CreditLimitExceededException(party.name, decision);
+            throw new CreditBlockedException(party.name, decision);
           }
           await this.credit.assertApprovalUsable(
             tx,
@@ -337,6 +388,24 @@ export class InvoicesService {
           id,
           actor.userId,
         );
+        // Payments applied to this invoice become unallocated advance again
+        // (negative allocation rows; nothing is deleted).
+        const applied = await tx.paymentAllocation.groupBy({
+          by: ['paymentId'],
+          where: { invoiceId: id },
+          _sum: { amount: true },
+        });
+        const release = applied.filter((a) => a._sum.amount?.gt(0));
+        if (release.length) {
+          await tx.paymentAllocation.createMany({
+            data: release.map((a) => ({
+              tenantId: actor.tenantId,
+              paymentId: a.paymentId,
+              invoiceId: id,
+              amount: a._sum.amount!.neg(),
+            })),
+          });
+        }
         await this.ledger.post(tx, {
           tenantId: actor.tenantId,
           partyId: invoice.partyId,

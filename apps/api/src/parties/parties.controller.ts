@@ -44,11 +44,12 @@ export class PartiesController {
   }
 
   @Get(':id')
+  @ApiOperation({ summary: 'Party with current balance and overdue amount' })
   findOne(
     @CurrentUser() actor: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,
   ) {
-    return this.parties.findOne(actor, id);
+    return this.parties.findOneWithBalance(actor, id);
   }
 
   @Roles(...MASTER_DATA_WRITE_ROLES)

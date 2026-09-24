@@ -106,3 +106,38 @@ describe('decisionProblem (who may approve)', () => {
     ).toMatch(/Only an owner or manager/);
   });
 });
+
+describe('evaluateCredit with overdue bills', () => {
+  const overdue = [
+    {
+      invoiceId: 'inv-1',
+      invoiceNo: 12,
+      fiscalYear: '2083/84',
+      invoiceDate: new Date('2026-07-20T00:00:00Z'),
+      dueDate: new Date('2026-08-04T00:00:00Z'),
+      daysOverdue: 51,
+      outstanding: D(8000),
+    },
+  ];
+
+  it('blocks with OVERDUE_INVOICES even when the limit is fine', () => {
+    const d = evaluateCredit(D(8000), D(50000), D(1000), overdue, true);
+    expect(d.allowed).toBe(false);
+    expect(d.code).toBe('OVERDUE_INVOICES');
+    expect(d.limitExceeded).toBe(false);
+    expect(d.overdueInvoices).toHaveLength(1);
+  });
+
+  it('does not block on overdue bills when blockOnOverdue is off', () => {
+    const d = evaluateCredit(D(8000), D(50000), D(1000), overdue, false);
+    expect(d.allowed).toBe(true);
+    expect(d.code).toBeNull();
+    expect(d.overdueInvoices).toEqual([]);
+  });
+
+  it('reports overdue first when both rules are broken', () => {
+    const d = evaluateCredit(D(49000), D(50000), D(5000), overdue, true);
+    expect(d.code).toBe('OVERDUE_INVOICES');
+    expect(d.limitExceeded).toBe(true);
+  });
+});

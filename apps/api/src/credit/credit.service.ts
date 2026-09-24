@@ -5,6 +5,8 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { OutstandingService } from '../accounts/outstanding.service.js';
+import { SettingsService } from '../accounts/settings.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { addDays, nepalDayStart, nepalTodayString } from '../common/dates.js';
 import { pageArgs } from '../common/pagination.js';
@@ -36,9 +38,39 @@ const APPROVAL_INCLUDE = {
   approvedBy: { select: { id: true, name: true } },
 } satisfies Prisma.CreditApprovalInclude;
 
-/** Thrown by invoicing when a party is over its limit; HTTP 409 with numbers for the UI. */
-export class CreditLimitExceededException extends ConflictException {
+/**
+ * Thrown by invoicing when credit is blocked; HTTP 409 with the numbers (and
+ * the overdue bills) so the UI can offer "Request approval".
+ */
+export class CreditBlockedException extends ConflictException {
   constructor(partyName: string, d: CreditDecision) {
+    const numbers = {
+      balance: d.balance.toFixed(2),
+      creditLimit: d.creditLimit.toFixed(2),
+      invoiceTotal: d.amount.toFixed(2),
+      balanceAfterInvoice: d.newBalance.toFixed(2),
+    };
+    if (d.code === 'OVERDUE_INVOICES') {
+      super({
+        statusCode: 409,
+        code: 'OVERDUE_INVOICES',
+        message:
+          `${partyName} has ${d.overdueInvoices.length} overdue invoice(s). ` +
+          'Collect payment or request a credit approval to continue.',
+        ...numbers,
+        creditLimitExceeded: d.limitExceeded,
+        overdueInvoices: d.overdueInvoices.map((i) => ({
+          invoiceId: i.invoiceId,
+          invoiceNo: i.invoiceNo,
+          fiscalYear: i.fiscalYear,
+          invoiceDate: i.invoiceDate.toISOString().slice(0, 10),
+          dueDate: i.dueDate.toISOString().slice(0, 10),
+          daysOverdue: i.daysOverdue,
+          outstanding: i.outstanding.toFixed(2),
+        })),
+      });
+      return;
+    }
     super({
       statusCode: 409,
       code: 'CREDIT_LIMIT_EXCEEDED',
@@ -46,10 +78,7 @@ export class CreditLimitExceededException extends ConflictException {
         `Credit limit exceeded for ${partyName}: balance Rs ${d.balance.toFixed(2)} + ` +
         `invoice Rs ${d.amount.toFixed(2)} is more than the limit of Rs ${d.creditLimit.toFixed(2)}. ` +
         'Request a credit approval to continue.',
-      balance: d.balance.toFixed(2),
-      creditLimit: d.creditLimit.toFixed(2),
-      invoiceTotal: d.amount.toFixed(2),
-      balanceAfterInvoice: d.newBalance.toFixed(2),
+      ...numbers,
     });
   }
 }
@@ -67,17 +96,13 @@ export class CreditService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly outstanding: OutstandingService,
+    private readonly settings: SettingsService,
   ) {}
 
   /** Receivable balance: SUM(debit) - SUM(credit). Positive = party owes us. */
-  async getPartyBalance(db: Db, tenantId: string, partyId: string) {
-    const sums = await db.ledgerEntry.aggregate({
-      where: { tenantId, partyId },
-      _sum: { debit: true, credit: true },
-    });
-    return (sums._sum.debit ?? new Decimal(0)).minus(
-      sums._sum.credit ?? new Decimal(0),
-    );
+  getPartyBalance(db: Db, tenantId: string, partyId: string) {
+    return this.outstanding.partyBalance(db, tenantId, partyId);
   }
 
   async checkCredit(
@@ -86,8 +111,25 @@ export class CreditService {
     party: { id: string; creditLimit: Prisma.Decimal },
     amount: Prisma.Decimal,
   ): Promise<CreditDecision> {
-    const balance = await this.getPartyBalance(db, tenantId, party.id);
-    return evaluateCredit(balance, party.creditLimit, amount);
+    const [balance, settings] = await Promise.all([
+      this.getPartyBalance(db, tenantId, party.id),
+      this.settings.get(db, tenantId),
+    ]);
+    const overdue = settings.blockOnOverdue
+      ? await this.outstanding.overdueInvoices(
+          db,
+          tenantId,
+          party.id,
+          settings.overdueGraceDays,
+        )
+      : [];
+    return evaluateCredit(
+      balance,
+      party.creditLimit,
+      amount,
+      overdue,
+      settings.blockOnOverdue,
+    );
   }
 
   async creditSummary(actor: AuthUser, partyId: string) {

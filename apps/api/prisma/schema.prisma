@@ -98,6 +98,9 @@ enum DocType {
   INVOICE
   SALES_ORDER
   SALES_RETURN
+  RECEIPT // customer payment received
+  SUPPLIER_PAYMENT
+  HANDOVER
 }
 
 enum CreditApprovalStatus {
@@ -105,6 +108,23 @@ enum CreditApprovalStatus {
   APPROVED
   REJECTED
   USED
+}
+
+enum PaymentStatus {
+  ACTIVE
+  REVERSED // reversed or cheque bounced: ledger + allocations undone by new rows
+}
+
+enum ChequeStatus {
+  PENDING
+  CLEARED
+  BOUNCED
+}
+
+enum HandoverStatus {
+  SUBMITTED
+  VERIFIED
+  DISPUTED
 }
 
 enum AuditAction {
@@ -127,36 +147,39 @@ model Tenant {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  users            User[]
-  godowns          Godown[]
-  categories       Category[]
-  products         Product[]
-  productUnits     ProductUnit[]
-  priceTiers       PriceTier[]
-  productPrices    ProductPrice[]
-  parties          Party[]
-  partyPrices      PartyPrice[]
-  beats            Beat[]
-  batches          Batch[]
-  stockMovements   StockMovement[]
-  purchases        Purchase[]
-  purchaseItems    PurchaseItem[]
-  salesOrders      SalesOrder[]
-  salesOrderItems  SalesOrderItem[]
-  invoices         Invoice[]
-  invoiceItems     InvoiceItem[]
-  salesReturns     SalesReturn[]
-  salesReturnItems SalesReturnItem[]
-  payments         Payment[]
-  ledgerEntries    LedgerEntry[]
-  docSequences     DocSequence[]
-  creditApprovals  CreditApproval[]
-  auditLogs        AuditLog[]
-  refreshTokens    RefreshToken[]
-  stockTransfers   StockTransfer[]
-  stockAdjustments StockAdjustment[]
-  stockCounts      StockCount[]
-  stockCountItems  StockCountItem[]
+  users              User[]
+  godowns            Godown[]
+  categories         Category[]
+  products           Product[]
+  productUnits       ProductUnit[]
+  priceTiers         PriceTier[]
+  productPrices      ProductPrice[]
+  parties            Party[]
+  partyPrices        PartyPrice[]
+  beats              Beat[]
+  batches            Batch[]
+  stockMovements     StockMovement[]
+  purchases          Purchase[]
+  purchaseItems      PurchaseItem[]
+  salesOrders        SalesOrder[]
+  salesOrderItems    SalesOrderItem[]
+  invoices           Invoice[]
+  invoiceItems       InvoiceItem[]
+  salesReturns       SalesReturn[]
+  salesReturnItems   SalesReturnItem[]
+  payments           Payment[]
+  ledgerEntries      LedgerEntry[]
+  docSequences       DocSequence[]
+  creditApprovals    CreditApproval[]
+  paymentAllocations PaymentAllocation[]
+  cashHandovers      CashHandover[]
+  setting            TenantSetting?
+  auditLogs          AuditLog[]
+  refreshTokens      RefreshToken[]
+  stockTransfers     StockTransfer[]
+  stockAdjustments   StockAdjustment[]
+  stockCounts        StockCount[]
+  stockCountItems    StockCountItem[]
 
   @@map("tenants")
 }
@@ -184,7 +207,11 @@ model User {
   creditRequests     CreditApproval[]  @relation("CreditRequestedBy")
   creditDecisions    CreditApproval[]  @relation("CreditDecidedBy")
   salesReturns       SalesReturn[]
-  paymentsReceived   Payment[]
+  paymentsReceived   Payment[]         @relation("PaymentReceivedBy")
+  paymentsCollected  Payment[]         @relation("PaymentCollectedBy")
+  paymentsReversed   Payment[]         @relation("PaymentReversedBy")
+  handoversFrom      CashHandover[]    @relation("HandoverFrom")
+  handoversReceived  CashHandover[]    @relation("HandoverReceivedBy")
   auditLogs          AuditLog[]
   refreshTokens      RefreshToken[]
   purchasesCancelled Purchase[]        @relation("PurchaseCancelledBy")
@@ -724,15 +751,16 @@ model Invoice {
   createdAt     DateTime      @default(now()) @map("created_at")
   updatedAt     DateTime      @updatedAt @map("updated_at")
 
-  tenant         Tenant          @relation(fields: [tenantId], references: [id])
-  party          Party           @relation(fields: [partyId], references: [id])
-  order          SalesOrder?     @relation(fields: [orderId], references: [id])
-  godown         Godown          @relation(fields: [godownId], references: [id])
-  createdBy      User            @relation("InvoiceCreatedBy", fields: [createdById], references: [id])
-  cancelledBy    User?           @relation("InvoiceCancelledBy", fields: [cancelledById], references: [id])
+  tenant         Tenant              @relation(fields: [tenantId], references: [id])
+  party          Party               @relation(fields: [partyId], references: [id])
+  order          SalesOrder?         @relation(fields: [orderId], references: [id])
+  godown         Godown              @relation(fields: [godownId], references: [id])
+  createdBy      User                @relation("InvoiceCreatedBy", fields: [createdById], references: [id])
+  cancelledBy    User?               @relation("InvoiceCancelledBy", fields: [cancelledById], references: [id])
   items          InvoiceItem[]
   salesReturns   SalesReturn[]
   creditApproval CreditApproval?
+  allocations    PaymentAllocation[]
 
   @@unique([tenantId, fiscalYear, invoiceNo])
   @@index([tenantId, partyId])
@@ -837,29 +865,107 @@ model SalesReturnItem {
 // ─── Money ──────────────────────────────────────────────────────────────────
 
 // Append-only. A wrong payment is corrected by a new row with reversalOfId set.
+// Money received from customers (IN) or paid to suppliers (OUT). Rows are never
+// deleted; a reversal or bounced cheque flips status and adds reversal ledger
+// and allocation rows.
 model Payment {
-  id           String           @id @default(uuid())
-  tenantId     String           @map("tenant_id")
-  partyId      String           @map("party_id")
-  direction    PaymentDirection
-  method       PaymentMethod
-  amount       Decimal          @db.Decimal(14, 2)
-  referenceNo  String?          @map("reference_no") // cheque no, bank / wallet txn id
-  receivedById String           @map("received_by_id")
-  paymentDate  DateTime         @map("payment_date") @db.Date
-  clientUuid   String?          @unique @map("client_uuid")
-  reversalOfId String?          @unique @map("reversal_of_id")
-  createdAt    DateTime         @default(now()) @map("created_at")
+  id             String           @id @default(uuid())
+  tenantId       String           @map("tenant_id")
+  partyId        String           @map("party_id")
+  direction      PaymentDirection
+  fiscalYear     String           @map("fiscal_year")
+  receiptNo      Int              @map("receipt_no") // per direction + fiscal year
+  method         PaymentMethod
+  amount         Decimal          @db.Decimal(14, 2)
+  status         PaymentStatus    @default(ACTIVE)
+  referenceNo    String?          @map("reference_no") // bank / wallet txn id
+  chequeNo       String?          @map("cheque_no")
+  chequeBank     String?          @map("cheque_bank")
+  chequeDate     DateTime?        @map("cheque_date") @db.Date
+  chequeStatus   ChequeStatus?    @map("cheque_status")
+  note           String?
+  paymentDate    DateTime         @map("payment_date") @db.Date
+  receivedById   String           @map("received_by_id") // who entered it
+  collectedById  String           @map("collected_by_id") // who physically holds the money
+  handoverId     String?          @map("handover_id")
+  clientUuid     String?          @unique @map("client_uuid")
+  reversedAt     DateTime?        @map("reversed_at")
+  reversedById   String?          @map("reversed_by_id")
+  reversalReason String?          @map("reversal_reason")
+  createdAt      DateTime         @default(now()) @map("created_at")
 
-  tenant     Tenant   @relation(fields: [tenantId], references: [id])
-  party      Party    @relation(fields: [partyId], references: [id])
-  receivedBy User     @relation(fields: [receivedById], references: [id])
-  reversalOf Payment? @relation("PaymentReversal", fields: [reversalOfId], references: [id])
-  reversedBy Payment? @relation("PaymentReversal")
+  tenant      Tenant              @relation(fields: [tenantId], references: [id])
+  party       Party               @relation(fields: [partyId], references: [id])
+  receivedBy  User                @relation("PaymentReceivedBy", fields: [receivedById], references: [id])
+  collectedBy User                @relation("PaymentCollectedBy", fields: [collectedById], references: [id])
+  reversedBy  User?               @relation("PaymentReversedBy", fields: [reversedById], references: [id])
+  handover    CashHandover?       @relation(fields: [handoverId], references: [id])
+  allocations PaymentAllocation[]
 
+  @@unique([tenantId, direction, fiscalYear, receiptNo])
   @@index([tenantId, partyId, paymentDate])
   @@index([tenantId, paymentDate])
+  @@index([tenantId, collectedById, handoverId])
   @@map("payments")
+}
+
+// Which invoices a payment settles. Append-only: undoing an allocation adds a
+// negative row. Invoice outstanding = total - SUM(amount).
+model PaymentAllocation {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  paymentId String   @map("payment_id")
+  invoiceId String   @map("invoice_id")
+  amount    Decimal  @db.Decimal(14, 2)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id])
+  payment Payment @relation(fields: [paymentId], references: [id])
+  invoice Invoice @relation(fields: [invoiceId], references: [id])
+
+  @@index([invoiceId])
+  @@index([paymentId])
+  @@index([tenantId])
+  @@map("payment_allocations")
+}
+
+// Cash a salesman/driver hands to the office.
+model CashHandover {
+  id             String         @id @default(uuid())
+  tenantId       String         @map("tenant_id")
+  handoverNo     String         @map("handover_no")
+  fromUserId     String         @map("from_user_id")
+  receivedById   String?        @map("received_by_id")
+  expectedAmount Decimal        @map("expected_amount") @db.Decimal(14, 2)
+  receivedAmount Decimal?       @map("received_amount") @db.Decimal(14, 2)
+  difference     Decimal?       @db.Decimal(14, 2) // received - expected
+  status         HandoverStatus @default(SUBMITTED)
+  note           String?
+  createdAt      DateTime       @default(now()) @map("created_at")
+  verifiedAt     DateTime?      @map("verified_at")
+  updatedAt      DateTime       @updatedAt @map("updated_at")
+
+  tenant     Tenant    @relation(fields: [tenantId], references: [id])
+  fromUser   User      @relation("HandoverFrom", fields: [fromUserId], references: [id])
+  receivedBy User?     @relation("HandoverReceivedBy", fields: [receivedById], references: [id])
+  payments   Payment[]
+
+  @@unique([tenantId, handoverNo])
+  @@index([tenantId, status])
+  @@index([tenantId, fromUserId])
+  @@map("cash_handovers")
+}
+
+// Per-tenant settings (one row per tenant; defaults apply when missing).
+model TenantSetting {
+  tenantId         String   @id @map("tenant_id")
+  overdueGraceDays Int      @default(7) @map("overdue_grace_days")
+  blockOnOverdue   Boolean  @default(true) @map("block_on_overdue")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@map("tenant_settings")
 }
 
 // Append-only. Party balance = SUM(debit) - SUM(credit); never stored.

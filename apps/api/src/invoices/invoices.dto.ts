@@ -4,6 +4,7 @@ import {
   ArrayMaxSize,
   ArrayMinSize,
   IsArray,
+  IsBoolean,
   IsEnum,
   IsNumber,
   IsOptional,
@@ -15,7 +16,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { PaginationQueryDto } from '../common/pagination.js';
-import { DateOnly } from '../common/validation.js';
+import { DateOnly, QueryBoolean } from '../common/validation.js';
 import { InvoiceStatus } from '../generated/prisma/client.js';
 import { MAX_MONEY } from '../pricing/dto/pricing.dto.js';
 import { SaleItemDto } from '../sales-orders/sales-orders.dto.js';
@@ -95,4 +96,20 @@ export class ListInvoicesQueryDto extends PaginationQueryDto {
   @IsOptional()
   @DateOnly()
   to?: string;
+
+  @ApiPropertyOptional({
+    description: 'Only issued invoices with something still owed',
+  })
+  @IsOptional()
+  @QueryBoolean()
+  @IsBoolean()
+  unpaid?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Only unpaid invoices past invoice date + party credit days',
+  })
+  @IsOptional()
+  @QueryBoolean()
+  @IsBoolean()
+  overdue?: boolean;
 }

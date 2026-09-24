@@ -3,6 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { OutstandingService } from '../accounts/outstanding.service.js';
 import { AuditService } from '../audit/audit.service.js';
 import { pageArgs } from '../common/pagination.js';
 import type { AuthUser } from '../common/types/auth-user.js';
@@ -26,7 +27,26 @@ export class PartiesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly outstanding: OutstandingService,
   ) {}
+
+  /** Party plus its current balance (from the ledger) and what is overdue. */
+  async findOneWithBalance(actor: AuthUser, id: string) {
+    const party = await this.findOne(actor, id);
+    const [balance, overdue] = await Promise.all([
+      this.outstanding.partyBalance(this.prisma, actor.tenantId, id),
+      this.outstanding.overdueInvoices(this.prisma, actor.tenantId, id),
+    ]);
+    return {
+      ...party,
+      balance,
+      overdueAmount: overdue.reduce(
+        (s, i) => s.plus(i.outstanding),
+        new Prisma.Decimal(0),
+      ),
+      overdueInvoiceCount: overdue.length,
+    };
+  }
 
   async list(actor: AuthUser, q: ListPartiesQueryDto) {
     const where: Prisma.PartyWhereInput = {
