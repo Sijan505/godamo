@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#1E3A5F" />
+    <meta name="description" content="Wholesale &amp; Distribution Management" />
+    <meta name="application-name" content="Godamo" />
+    <title>Log in · Godamo</title>
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/assets/css/app.css" />
+    <script type="module" src="/assets/js/login.js"></script>
+  </head>
+  <body>
+    <main class="login">
+      <!-- Brand panel (large screens) -->
+      <section class="login-brand" aria-label="Godamo">
+        <span class="logo" style="color: #fff">
+          <svg viewBox="0 0 120 120" class="logo-mark lg" aria-hidden="true" focusable="false">
+            <path d="M12 52 L60 18 L108 52" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M24 60 V101 M96 60 V101 M18 101 H102" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" />
+            <g fill="#F28C28">
+              <rect x="34" y="78" width="16" height="16" rx="2" /><rect x="52" y="78" width="16" height="16" rx="2" />
+              <rect x="70" y="78" width="16" height="16" rx="2" /><rect x="43" y="60" width="16" height="16" rx="2" />
+              <rect x="61" y="60" width="16" height="16" rx="2" /><rect x="52" y="42" width="16" height="16" rx="2" />
+            </g>
+          </svg>
+          <span class="logo-word">godamo</span>
+        </span>
+        <div style="max-width: 28rem">
+          <p lang="ne" class="ne">गोदामो</p>
+          <h1>Wholesale &amp; Distribution Management</h1>
+          <p class="lead">Stock, billing, credit and collections for Nepali distributors, all in one place.</p>
+        </div>
+        <p class="copy">© Cezvora Technology</p>
+        <svg aria-hidden="true" viewBox="0 0 120 120" class="watermark">
+          <path d="M12 52 L60 18 L108 52" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="M24 60 V101 M96 60 V101 M18 101 H102" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+      </section>
+
+      <!-- Form -->
+      <section class="login-main">
+        <div class="login-mobile-logo">
+          <span class="logo">
+            <svg viewBox="0 0 120 120" class="logo-mark lg" aria-hidden="true" focusable="false">
+              <path d="M12 52 L60 18 L108 52" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" />
+              <path d="M24 60 V101 M96 60 V101 M18 101 H102" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" />
+              <g fill="#F28C28">
+                <rect x="34" y="78" width="16" height="16" rx="2" /><rect x="52" y="78" width="16" height="16" rx="2" />
+                <rect x="70" y="78" width="16" height="16" rx="2" /><rect x="43" y="60" width="16" height="16" rx="2" />
+                <rect x="61" y="60" width="16" height="16" rx="2" /><rect x="52" y="42" width="16" height="16" rx="2" />
+              </g>
+            </svg>
+            <span class="logo-word">godamo</span>
+          </span>
+          <p class="muted" style="font-size: 0.875rem">Wholesale &amp; Distribution Management</p>
+        </div>
+
+        <div class="card login-card">
+          <div class="card-header">
+            <h2 class="card-title">Log in</h2>
+            <p class="card-description">Use the company code, mobile number and password given by your owner.</p>
+          </div>
+          <div class="card-content">
+            <form id="login-form" class="login-form" novalidate>
+              <div id="login-error" class="alert-error" role="alert" hidden></div>
+
+              <div class="field">
+                <label class="label" for="company">Company code</label>
+                <input id="company" name="companyCode" class="input" autocomplete="organization" autocapitalize="characters" spellcheck="false" placeholder="e.g. DEMO" />
+                <p id="company-err" class="field-error" hidden></p>
+              </div>
+
+              <div class="field">
+                <label class="label" for="phone">Mobile number</label>
+                <input id="phone" name="phone" class="input" type="tel" inputmode="numeric" autocomplete="username" placeholder="98XXXXXXXX" maxlength="10" />
+                <p id="phone-err" class="field-error" hidden></p>
+              </div>
+
+              <div class="field">
+                <label class="label" for="password">Password</label>
+                <div class="password-wrap">
+                  <input id="password" name="password" class="input" type="password" autocomplete="current-password" />
+                  <button id="toggle-password" type="button" class="btn btn-ghost btn-icon password-toggle" aria-label="Show password" aria-pressed="false"></button>
+                </div>
+                <p id="password-err" class="field-error" hidden></p>
+              </div>
+
+              <label class="checkbox-row">
+                <input id="remember" type="checkbox" />
+                Remember company code on this device
+              </label>
+
+              <button id="submit" type="submit" class="btn btn-primary btn-lg btn-block"></button>
+            </form>
+          </div>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

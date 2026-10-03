@@ -1,0 +1,1058 @@
+// Godamo core schema. See docs/PROJECT_CONTEXT.md for the business rules.
+//
+// Conventions:
+// - Every table carries tenant_id (core rule 8), including child tables.
+// - Money is Decimal(14,2). Quantities are Decimal(14,3) in the product's BASE unit
+//   unless a column is explicitly "quantity in the chosen unit".
+// - stock_movements, payments, ledger_entries and audit_logs are append-only:
+//   no updated_at, corrections are new reversal rows (core rule 6).
+// - Stock and party balances are never stored; they are SUMs over those tables.
+
+generator client {
+  provider     = "prisma-client-js"
+  output       = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── Enums ──────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  OWNER
+  MANAGER
+  OFFICE
+  GODOWN
+  SALESMAN
+  DRIVER
+}
+
+enum PartyType {
+  CUSTOMER
+  SUPPLIER
+  BOTH
+}
+
+enum MovementType {
+  OPENING
+  PURCHASE
+  SALE
+  SALES_RETURN
+  PURCHASE_RETURN
+  TRANSFER_IN
+  TRANSFER_OUT
+  ADJUSTMENT
+  DAMAGE
+}
+
+enum OrderStatus {
+  DRAFT
+  CONFIRMED
+  BILLED
+  CANCELLED
+}
+
+enum InvoiceStatus {
+  ISSUED
+  CANCELLED
+}
+
+enum PaymentMethod {
+  CASH
+  CHEQUE
+  BANK
+  FONEPAY
+  ESEWA
+  KHALTI
+}
+
+enum PaymentDirection {
+  IN // received from a customer
+  OUT // paid to a supplier
+}
+
+enum LedgerEntryType {
+  OPENING
+  INVOICE
+  PAYMENT
+  SALES_RETURN
+  PURCHASE
+  PURCHASE_PAYMENT
+  PURCHASE_RETURN
+  ADJUSTMENT
+}
+
+enum PurchaseStatus {
+  POSTED
+  CANCELLED
+}
+
+enum StockCountStatus {
+  PENDING // counted, differences not yet posted
+  APPLIED // ADJUSTMENT movements posted
+}
+
+enum DocType {
+  INVOICE
+  SALES_ORDER
+  SALES_RETURN
+  RECEIPT // customer payment received
+  SUPPLIER_PAYMENT
+  HANDOVER
+}
+
+enum CreditApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  USED
+}
+
+enum PaymentStatus {
+  ACTIVE
+  REVERSED // reversed or cheque bounced: ledger + allocations undone by new rows
+}
+
+enum ChequeStatus {
+  PENDING
+  CLEARED
+  BOUNCED
+}
+
+enum HandoverStatus {
+  SUBMITTED
+  VERIFIED
+  DISPUTED
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  CANCEL
+  DELETE
+}
+
+// ─── Tenant & users ─────────────────────────────────────────────────────────
+
+model Tenant {
+  id        String   @id @default(uuid())
+  code      String   @unique // company code typed at login, always UPPERCASE, e.g. "DEMO"
+  name      String
+  panVatNo  String?  @map("pan_vat_no")
+  address   String?
+  phone     String?
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  users              User[]
+  godowns            Godown[]
+  categories         Category[]
+  products           Product[]
+  productUnits       ProductUnit[]
+  priceTiers         PriceTier[]
+  productPrices      ProductPrice[]
+  parties            Party[]
+  partyPrices        PartyPrice[]
+  beats              Beat[]
+  batches            Batch[]
+  stockMovements     StockMovement[]
+  purchases          Purchase[]
+  purchaseItems      PurchaseItem[]
+  salesOrders        SalesOrder[]
+  salesOrderItems    SalesOrderItem[]
+  invoices           Invoice[]
+  invoiceItems       InvoiceItem[]
+  salesReturns       SalesReturn[]
+  salesReturnItems   SalesReturnItem[]
+  payments           Payment[]
+  ledgerEntries      LedgerEntry[]
+  docSequences       DocSequence[]
+  creditApprovals    CreditApproval[]
+  paymentAllocations PaymentAllocation[]
+  cashHandovers      CashHandover[]
+  setting            TenantSetting?
+  auditLogs          AuditLog[]
+  refreshTokens      RefreshToken[]
+  stockTransfers     StockTransfer[]
+  stockAdjustments   StockAdjustment[]
+  stockCounts        StockCount[]
+  stockCountItems    StockCountItem[]
+
+  @@map("tenants")
+}
+
+model User {
+  id           String    @id @default(uuid())
+  tenantId     String    @map("tenant_id")
+  name         String
+  phone        String
+  email        String?
+  passwordHash String    @map("password_hash")
+  role         UserRole
+  isActive     Boolean   @default(true) @map("is_active")
+  lastLoginAt  DateTime? @map("last_login_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  tenant             Tenant            @relation(fields: [tenantId], references: [id])
+  beats              Beat[]
+  stockMovements     StockMovement[]
+  purchases          Purchase[]        @relation("PurchaseCreatedBy")
+  salesOrders        SalesOrder[]
+  invoices           Invoice[]         @relation("InvoiceCreatedBy")
+  invoicesCancelled  Invoice[]         @relation("InvoiceCancelledBy")
+  creditRequests     CreditApproval[]  @relation("CreditRequestedBy")
+  creditDecisions    CreditApproval[]  @relation("CreditDecidedBy")
+  salesReturns       SalesReturn[]
+  paymentsReceived   Payment[]         @relation("PaymentReceivedBy")
+  paymentsCollected  Payment[]         @relation("PaymentCollectedBy")
+  paymentsReversed   Payment[]         @relation("PaymentReversedBy")
+  handoversFrom      CashHandover[]    @relation("HandoverFrom")
+  handoversReceived  CashHandover[]    @relation("HandoverReceivedBy")
+  auditLogs          AuditLog[]
+  refreshTokens      RefreshToken[]
+  purchasesCancelled Purchase[]        @relation("PurchaseCancelledBy")
+  stockTransfers     StockTransfer[]
+  stockAdjustments   StockAdjustment[]
+  stockCountsCreated StockCount[]      @relation("StockCountCreatedBy")
+  stockCountsApplied StockCount[]      @relation("StockCountAppliedBy")
+
+  @@unique([tenantId, phone])
+  @@map("users")
+}
+
+// Only an HMAC of the refresh token is stored; the raw token lives on the client.
+// Rotated on every /auth/refresh: the old row gets revokedAt, a new row is created.
+model RefreshToken {
+  id        String    @id @default(uuid())
+  tenantId  String    @map("tenant_id")
+  userId    String    @map("user_id")
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  userAgent String?   @map("user_agent")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  user   User   @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([tenantId])
+  @@map("refresh_tokens")
+}
+
+model Godown {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  name      String
+  address   String?
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant         Tenant            @relation(fields: [tenantId], references: [id])
+  stockMovements StockMovement[]
+  purchases      Purchase[]
+  salesOrders    SalesOrder[]
+  invoices       Invoice[]
+  salesReturns   SalesReturn[]
+  transfersOut   StockTransfer[]   @relation("TransferFrom")
+  transfersIn    StockTransfer[]   @relation("TransferTo")
+  adjustments    StockAdjustment[]
+  stockCounts    StockCount[]
+
+  @@unique([tenantId, name])
+  @@map("godowns")
+}
+
+// ─── Catalogue ──────────────────────────────────────────────────────────────
+
+model Category {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  name      String
+  parentId  String?  @map("parent_id")
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant   Tenant     @relation(fields: [tenantId], references: [id])
+  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children Category[] @relation("CategoryTree")
+  products Product[]
+
+  @@unique([tenantId, name]) // names are unique per tenant so Excel import can match by name
+  @@index([tenantId, parentId])
+  @@map("categories")
+}
+
+model Product {
+  id            String   @id @default(uuid())
+  tenantId      String   @map("tenant_id")
+  sku           String
+  barcode       String?
+  name          String
+  nameNepali    String?  @map("name_nepali")
+  categoryId    String   @map("category_id")
+  brand         String?
+  baseUnit      String   @map("base_unit") // smallest unit, e.g. "pcs", "kg"
+  vatApplicable Boolean  @default(true) @map("vat_applicable")
+  trackBatch    Boolean  @default(false) @map("track_batch")
+  reorderLevel  Decimal  @default(0) @map("reorder_level") @db.Decimal(14, 3) // base unit
+  isActive      Boolean  @default(true) @map("is_active")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  tenant           Tenant            @relation(fields: [tenantId], references: [id])
+  category         Category          @relation(fields: [categoryId], references: [id])
+  units            ProductUnit[]
+  prices           ProductPrice[]
+  partyPrices      PartyPrice[]
+  batches          Batch[]
+  stockMovements   StockMovement[]
+  purchaseItems    PurchaseItem[]
+  salesOrderItems  SalesOrderItem[]
+  invoiceItems     InvoiceItem[]
+  salesReturnItems SalesReturnItem[]
+  stockCountItems  StockCountItem[]
+
+  @@unique([tenantId, sku])
+  @@unique([tenantId, barcode])
+  @@index([tenantId, categoryId])
+  @@map("products")
+}
+
+model ProductUnit {
+  id                String   @id @default(uuid())
+  tenantId          String   @map("tenant_id")
+  productId         String   @map("product_id")
+  name              String // e.g. "carton", "box", "pcs"
+  factor            Decimal  @db.Decimal(14, 3) // how many BASE units are in one of this unit
+  isDefaultSale     Boolean  @default(false) @map("is_default_sale")
+  isDefaultPurchase Boolean  @default(false) @map("is_default_purchase")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  tenant           Tenant            @relation(fields: [tenantId], references: [id])
+  product          Product           @relation(fields: [productId], references: [id])
+  prices           ProductPrice[]
+  partyPrices      PartyPrice[]
+  purchaseItems    PurchaseItem[]
+  salesOrderItems  SalesOrderItem[]
+  invoiceItems     InvoiceItem[]
+  salesReturnItems SalesReturnItem[]
+  stockCountItems  StockCountItem[]
+
+  @@unique([productId, name])
+  @@index([tenantId])
+  @@map("product_units")
+}
+
+model PriceTier {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  name      String // e.g. "Retailer", "Sub-dealer", "Bulk"
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant  Tenant         @relation(fields: [tenantId], references: [id])
+  prices  ProductPrice[]
+  parties Party[]
+
+  @@unique([tenantId, name])
+  @@map("price_tiers")
+}
+
+model ProductPrice {
+  id          String   @id @default(uuid())
+  tenantId    String   @map("tenant_id")
+  productId   String   @map("product_id")
+  unitId      String   @map("unit_id")
+  priceTierId String   @map("price_tier_id")
+  price       Decimal  @db.Decimal(14, 2) // per one of `unit`
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  tenant    Tenant      @relation(fields: [tenantId], references: [id])
+  product   Product     @relation(fields: [productId], references: [id])
+  unit      ProductUnit @relation(fields: [unitId], references: [id])
+  priceTier PriceTier   @relation(fields: [priceTierId], references: [id])
+
+  @@unique([productId, unitId, priceTierId])
+  @@index([tenantId])
+  @@map("product_prices")
+}
+
+// ─── Parties & pricing ──────────────────────────────────────────────────────
+
+model Beat {
+  id         String   @id @default(uuid())
+  tenantId   String   @map("tenant_id")
+  name       String
+  dayOfWeek  Int?     @map("day_of_week") // 0 = Sunday … 6 = Saturday
+  salesmanId String?  @map("salesman_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  tenant   Tenant  @relation(fields: [tenantId], references: [id])
+  salesman User?   @relation(fields: [salesmanId], references: [id])
+  parties  Party[]
+
+  @@unique([tenantId, name])
+  @@map("beats")
+}
+
+model Party {
+  id          String    @id @default(uuid())
+  tenantId    String    @map("tenant_id")
+  type        PartyType
+  name        String
+  ownerName   String?   @map("owner_name")
+  phone       String?
+  panVatNo    String?   @map("pan_vat_no")
+  address     String?
+  priceTierId String?   @map("price_tier_id")
+  creditLimit Decimal   @default(0) @map("credit_limit") @db.Decimal(14, 2)
+  creditDays  Int       @default(0) @map("credit_days")
+  beatId      String?   @map("beat_id")
+  isActive    Boolean   @default(true) @map("is_active")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  // No balance column: balance = SUM(debit) - SUM(credit) over ledger_entries.
+
+  tenant          Tenant           @relation(fields: [tenantId], references: [id])
+  priceTier       PriceTier?       @relation(fields: [priceTierId], references: [id])
+  beat            Beat?            @relation(fields: [beatId], references: [id])
+  partyPrices     PartyPrice[]
+  purchases       Purchase[]
+  salesOrders     SalesOrder[]
+  invoices        Invoice[]
+  salesReturns    SalesReturn[]
+  payments        Payment[]
+  ledgerEntries   LedgerEntry[]
+  creditApprovals CreditApproval[]
+
+  @@index([tenantId, type])
+  @@index([tenantId, beatId])
+  @@map("parties")
+}
+
+model PartyPrice {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  partyId   String   @map("party_id")
+  productId String   @map("product_id")
+  unitId    String   @map("unit_id")
+  price     Decimal  @db.Decimal(14, 2) // overrides the party's tier price
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant  Tenant      @relation(fields: [tenantId], references: [id])
+  party   Party       @relation(fields: [partyId], references: [id])
+  product Product     @relation(fields: [productId], references: [id])
+  unit    ProductUnit @relation(fields: [unitId], references: [id])
+
+  @@unique([partyId, productId, unitId])
+  @@index([tenantId])
+  @@map("party_prices")
+}
+
+// ─── Stock ──────────────────────────────────────────────────────────────────
+
+model Batch {
+  id         String    @id @default(uuid())
+  tenantId   String    @map("tenant_id")
+  productId  String    @map("product_id")
+  batchNo    String    @map("batch_no")
+  expiryDate DateTime? @map("expiry_date") @db.Date
+  mfgDate    DateTime? @map("mfg_date") @db.Date
+  costPrice  Decimal   @map("cost_price") @db.Decimal(14, 4) // per BASE unit; 4dp so carton cost / pcs doesn't round
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  tenant           Tenant            @relation(fields: [tenantId], references: [id])
+  product          Product           @relation(fields: [productId], references: [id])
+  stockMovements   StockMovement[]
+  purchaseItems    PurchaseItem[]
+  invoiceItems     InvoiceItem[]
+  salesReturnItems SalesReturnItem[]
+  stockCountItems  StockCountItem[]
+
+  @@unique([productId, batchNo])
+  @@index([productId, expiryDate]) // FEFO picking
+  @@index([tenantId])
+  @@map("batches")
+}
+
+// Append-only. Stock on hand = SUM(quantity) grouped by product/godown/batch.
+model StockMovement {
+  id           String       @id @default(uuid())
+  tenantId     String       @map("tenant_id")
+  godownId     String       @map("godown_id")
+  productId    String       @map("product_id")
+  batchId      String?      @map("batch_id")
+  type         MovementType
+  quantity     Decimal      @db.Decimal(14, 3) // BASE unit; positive = in, negative = out
+  unitCost     Decimal      @default(0) @map("unit_cost") @db.Decimal(14, 4) // per BASE unit
+  refType      String       @map("ref_type") // e.g. "PURCHASE", "INVOICE"
+  refId        String       @map("ref_id")
+  reversalOfId String?      @unique @map("reversal_of_id")
+  clientUuid   String?      @unique @map("client_uuid")
+  createdById  String       @map("created_by_id")
+  createdAt    DateTime     @default(now()) @map("created_at")
+
+  tenant     Tenant         @relation(fields: [tenantId], references: [id])
+  godown     Godown         @relation(fields: [godownId], references: [id])
+  product    Product        @relation(fields: [productId], references: [id])
+  batch      Batch?         @relation(fields: [batchId], references: [id])
+  reversalOf StockMovement? @relation("StockMovementReversal", fields: [reversalOfId], references: [id])
+  reversedBy StockMovement? @relation("StockMovementReversal")
+  createdBy  User           @relation(fields: [createdById], references: [id])
+
+  @@index([tenantId, productId, godownId])
+  @@index([tenantId, godownId, productId])
+  @@index([refType, refId])
+  @@index([batchId])
+  @@map("stock_movements")
+}
+
+// Header for a godown-to-godown transfer; its movements use refType "TRANSFER".
+model StockTransfer {
+  id           String   @id @default(uuid())
+  tenantId     String   @map("tenant_id")
+  fromGodownId String   @map("from_godown_id")
+  toGodownId   String   @map("to_godown_id")
+  note         String?
+  createdById  String   @map("created_by_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  tenant     Tenant @relation(fields: [tenantId], references: [id])
+  fromGodown Godown @relation("TransferFrom", fields: [fromGodownId], references: [id])
+  toGodown   Godown @relation("TransferTo", fields: [toGodownId], references: [id])
+  createdBy  User   @relation(fields: [createdById], references: [id])
+
+  @@index([tenantId, createdAt])
+  @@map("stock_transfers")
+}
+
+// Header for a manual ADJUSTMENT or DAMAGE; its movements use refType "ADJUSTMENT".
+model StockAdjustment {
+  id          String       @id @default(uuid())
+  tenantId    String       @map("tenant_id")
+  godownId    String       @map("godown_id")
+  type        MovementType // ADJUSTMENT or DAMAGE
+  reason      String
+  createdById String       @map("created_by_id")
+  createdAt   DateTime     @default(now()) @map("created_at")
+
+  tenant    Tenant @relation(fields: [tenantId], references: [id])
+  godown    Godown @relation(fields: [godownId], references: [id])
+  createdBy User   @relation(fields: [createdById], references: [id])
+
+  @@index([tenantId, createdAt])
+  @@map("stock_adjustments")
+}
+
+// Physical stock count. Differences are frozen when counted and posted as
+// ADJUSTMENT movements (refType "STOCK_COUNT") when applied.
+model StockCount {
+  id          String           @id @default(uuid())
+  tenantId    String           @map("tenant_id")
+  godownId    String           @map("godown_id")
+  status      StockCountStatus @default(PENDING)
+  note        String?
+  createdById String           @map("created_by_id")
+  appliedById String?          @map("applied_by_id")
+  appliedAt   DateTime?        @map("applied_at")
+  createdAt   DateTime         @default(now()) @map("created_at")
+  updatedAt   DateTime         @updatedAt @map("updated_at")
+
+  tenant    Tenant           @relation(fields: [tenantId], references: [id])
+  godown    Godown           @relation(fields: [godownId], references: [id])
+  createdBy User             @relation("StockCountCreatedBy", fields: [createdById], references: [id])
+  appliedBy User?            @relation("StockCountAppliedBy", fields: [appliedById], references: [id])
+  items     StockCountItem[]
+
+  @@index([tenantId, createdAt])
+  @@map("stock_counts")
+}
+
+model StockCountItem {
+  id                String   @id @default(uuid())
+  tenantId          String   @map("tenant_id")
+  countId           String   @map("count_id")
+  productId         String   @map("product_id")
+  batchId           String?  @map("batch_id")
+  unitId            String   @map("unit_id")
+  countedQty        Decimal  @map("counted_qty") @db.Decimal(14, 3) // in the chosen unit
+  countedBaseQty    Decimal  @map("counted_base_qty") @db.Decimal(14, 3)
+  systemBaseQty     Decimal  @map("system_base_qty") @db.Decimal(14, 3) // stock when counted
+  differenceBaseQty Decimal  @map("difference_base_qty") @db.Decimal(14, 3) // counted - system
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  tenant  Tenant      @relation(fields: [tenantId], references: [id])
+  count   StockCount  @relation(fields: [countId], references: [id])
+  product Product     @relation(fields: [productId], references: [id])
+  batch   Batch?      @relation(fields: [batchId], references: [id])
+  unit    ProductUnit @relation(fields: [unitId], references: [id])
+
+  @@index([countId])
+  @@map("stock_count_items")
+}
+
+// ─── Purchasing ─────────────────────────────────────────────────────────────
+
+model Purchase {
+  id             String         @id @default(uuid())
+  tenantId       String         @map("tenant_id")
+  supplierId     String         @map("supplier_id")
+  godownId       String         @map("godown_id")
+  supplierBillNo String         @map("supplier_bill_no")
+  purchaseDate   DateTime       @map("purchase_date") @db.Date
+  subtotal       Decimal        @db.Decimal(14, 2)
+  discount       Decimal        @default(0) @db.Decimal(14, 2)
+  vatAmount      Decimal        @default(0) @map("vat_amount") @db.Decimal(14, 2)
+  total          Decimal        @db.Decimal(14, 2)
+  status         PurchaseStatus @default(POSTED)
+  cancelReason   String?        @map("cancel_reason")
+  cancelledAt    DateTime?      @map("cancelled_at")
+  cancelledById  String?        @map("cancelled_by_id")
+  createdById    String         @map("created_by_id")
+  createdAt      DateTime       @default(now()) @map("created_at")
+  updatedAt      DateTime       @updatedAt @map("updated_at")
+
+  tenant      Tenant         @relation(fields: [tenantId], references: [id])
+  supplier    Party          @relation(fields: [supplierId], references: [id])
+  godown      Godown         @relation(fields: [godownId], references: [id])
+  createdBy   User           @relation("PurchaseCreatedBy", fields: [createdById], references: [id])
+  cancelledBy User?          @relation("PurchaseCancelledBy", fields: [cancelledById], references: [id])
+  items       PurchaseItem[]
+
+  @@unique([tenantId, supplierId, supplierBillNo]) // same supplier bill can't be entered twice
+  @@index([tenantId, purchaseDate])
+  @@map("purchases")
+}
+
+model PurchaseItem {
+  id           String   @id @default(uuid())
+  tenantId     String   @map("tenant_id")
+  purchaseId   String   @map("purchase_id")
+  productId    String   @map("product_id")
+  unitId       String   @map("unit_id")
+  batchId      String?  @map("batch_id")
+  quantity     Decimal  @db.Decimal(14, 3) // in the chosen unit
+  baseQuantity Decimal  @map("base_quantity") @db.Decimal(14, 3)
+  rate         Decimal  @db.Decimal(14, 2) // per chosen unit
+  discount     Decimal  @default(0) @db.Decimal(14, 2)
+  amount       Decimal  @db.Decimal(14, 2) // quantity x rate - discount, before VAT
+  vatAmount    Decimal  @default(0) @map("vat_amount") @db.Decimal(14, 2)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  tenant   Tenant      @relation(fields: [tenantId], references: [id])
+  purchase Purchase    @relation(fields: [purchaseId], references: [id])
+  product  Product     @relation(fields: [productId], references: [id])
+  unit     ProductUnit @relation(fields: [unitId], references: [id])
+  batch    Batch?      @relation(fields: [batchId], references: [id])
+
+  @@index([purchaseId])
+  @@index([tenantId, productId])
+  @@map("purchase_items")
+}
+
+// ─── Sales ──────────────────────────────────────────────────────────────────
+
+model SalesOrder {
+  id           String      @id @default(uuid())
+  tenantId     String      @map("tenant_id")
+  orderNo      String      @map("order_no")
+  partyId      String      @map("party_id")
+  salesmanId   String      @map("salesman_id")
+  godownId     String      @map("godown_id")
+  orderDate    DateTime    @map("order_date") @db.Date
+  status       OrderStatus @default(DRAFT)
+  notes        String?
+  subtotal     Decimal     @default(0) @db.Decimal(14, 2) // estimate at order time
+  discount     Decimal     @default(0) @db.Decimal(14, 2)
+  vatAmount    Decimal     @default(0) @map("vat_amount") @db.Decimal(14, 2)
+  total        Decimal     @default(0) @db.Decimal(14, 2)
+  cancelReason String?     @map("cancel_reason")
+  clientUuid   String?     @unique @map("client_uuid")
+  createdAt    DateTime    @default(now()) @map("created_at")
+  updatedAt    DateTime    @updatedAt @map("updated_at")
+
+  tenant   Tenant           @relation(fields: [tenantId], references: [id])
+  party    Party            @relation(fields: [partyId], references: [id])
+  salesman User             @relation(fields: [salesmanId], references: [id])
+  godown   Godown           @relation(fields: [godownId], references: [id])
+  items    SalesOrderItem[]
+  invoices Invoice[]
+
+  @@unique([tenantId, orderNo])
+  @@index([tenantId, status])
+  @@index([tenantId, partyId])
+  @@index([tenantId, salesmanId, orderDate])
+  @@map("sales_orders")
+}
+
+model SalesOrderItem {
+  id              String   @id @default(uuid())
+  tenantId        String   @map("tenant_id")
+  orderId         String   @map("order_id")
+  productId       String   @map("product_id")
+  unitId          String   @map("unit_id")
+  quantity        Decimal  @db.Decimal(14, 3) // in the chosen unit
+  baseQuantity    Decimal  @map("base_quantity") @db.Decimal(14, 3)
+  rate            Decimal  @db.Decimal(14, 2)
+  discountPercent Decimal  @default(0) @map("discount_percent") @db.Decimal(5, 2)
+  discount        Decimal  @default(0) @db.Decimal(14, 2) // amount = quantity x rate x discountPercent
+  vatAmount       Decimal  @default(0) @map("vat_amount") @db.Decimal(14, 2)
+  priceSource     String?  @map("price_source") // SPECIAL | TIER | DERIVED
+  schemeFreeQty   Decimal  @default(0) @map("scheme_free_qty") @db.Decimal(14, 3) // in the chosen unit
+  amount          Decimal  @db.Decimal(14, 2)
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  tenant  Tenant      @relation(fields: [tenantId], references: [id])
+  order   SalesOrder  @relation(fields: [orderId], references: [id])
+  product Product     @relation(fields: [productId], references: [id])
+  unit    ProductUnit @relation(fields: [unitId], references: [id])
+
+  @@index([orderId])
+  @@index([tenantId, productId])
+  @@map("sales_order_items")
+}
+
+// IRD tax invoice. Never deleted; cancel by setting status + cancelReason.
+model Invoice {
+  id            String        @id @default(uuid())
+  tenantId      String        @map("tenant_id")
+  fiscalYear    String        @map("fiscal_year") // BS fiscal year, e.g. "2083/84"
+  invoiceNo     Int           @map("invoice_no") // sequential per tenant + fiscal year
+  invoiceDate   DateTime      @map("invoice_date") @db.Date
+  partyId       String        @map("party_id")
+  orderId       String?       @map("order_id")
+  godownId      String        @map("godown_id")
+  subtotal      Decimal       @db.Decimal(14, 2)
+  discount      Decimal       @default(0) @db.Decimal(14, 2)
+  taxableAmount Decimal       @map("taxable_amount") @db.Decimal(14, 2)
+  vatAmount     Decimal       @map("vat_amount") @db.Decimal(14, 2)
+  total         Decimal       @db.Decimal(14, 2)
+  status        InvoiceStatus @default(ISSUED)
+  cancelReason  String?       @map("cancel_reason")
+  cancelledAt   DateTime?     @map("cancelled_at")
+  cancelledById String?       @map("cancelled_by_id")
+  printCount    Int           @default(0) @map("print_count")
+  createdById   String        @map("created_by_id")
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime      @updatedAt @map("updated_at")
+
+  tenant         Tenant              @relation(fields: [tenantId], references: [id])
+  party          Party               @relation(fields: [partyId], references: [id])
+  order          SalesOrder?         @relation(fields: [orderId], references: [id])
+  godown         Godown              @relation(fields: [godownId], references: [id])
+  createdBy      User                @relation("InvoiceCreatedBy", fields: [createdById], references: [id])
+  cancelledBy    User?               @relation("InvoiceCancelledBy", fields: [cancelledById], references: [id])
+  items          InvoiceItem[]
+  salesReturns   SalesReturn[]
+  creditApproval CreditApproval?
+  allocations    PaymentAllocation[]
+
+  @@unique([tenantId, fiscalYear, invoiceNo])
+  @@index([tenantId, partyId])
+  @@index([tenantId, invoiceDate])
+  @@index([orderId])
+  @@map("invoices")
+}
+
+model InvoiceItem {
+  id              String   @id @default(uuid())
+  tenantId        String   @map("tenant_id")
+  invoiceId       String   @map("invoice_id")
+  lineNo          Int      @default(1) @map("line_no") // a line split over batches keeps one lineNo
+  productId       String   @map("product_id")
+  unitId          String   @map("unit_id")
+  batchId         String?  @map("batch_id")
+  quantity        Decimal  @db.Decimal(14, 3) // in the chosen unit
+  baseQuantity    Decimal  @map("base_quantity") @db.Decimal(14, 3)
+  rate            Decimal  @db.Decimal(14, 2)
+  discountPercent Decimal  @default(0) @map("discount_percent") @db.Decimal(5, 2)
+  discount        Decimal  @default(0) @db.Decimal(14, 2)
+  priceSource     String?  @map("price_source")
+  vatAmount       Decimal  @default(0) @map("vat_amount") @db.Decimal(14, 2)
+  amount          Decimal  @db.Decimal(14, 2)
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  tenant  Tenant      @relation(fields: [tenantId], references: [id])
+  invoice Invoice     @relation(fields: [invoiceId], references: [id])
+  product Product     @relation(fields: [productId], references: [id])
+  unit    ProductUnit @relation(fields: [unitId], references: [id])
+  batch   Batch?      @relation(fields: [batchId], references: [id])
+
+  @@index([invoiceId])
+  @@index([tenantId, productId])
+  @@map("invoice_items")
+}
+
+// Credit note against an issued invoice. Same shape as Invoice.
+model SalesReturn {
+  id                String        @id @default(uuid())
+  tenantId          String        @map("tenant_id")
+  fiscalYear        String        @map("fiscal_year")
+  returnNo          Int           @map("return_no")
+  returnDate        DateTime      @map("return_date") @db.Date
+  partyId           String        @map("party_id")
+  originalInvoiceId String        @map("original_invoice_id")
+  godownId          String        @map("godown_id")
+  reason            String
+  subtotal          Decimal       @db.Decimal(14, 2)
+  discount          Decimal       @default(0) @db.Decimal(14, 2)
+  taxableAmount     Decimal       @map("taxable_amount") @db.Decimal(14, 2)
+  vatAmount         Decimal       @map("vat_amount") @db.Decimal(14, 2)
+  total             Decimal       @db.Decimal(14, 2)
+  status            InvoiceStatus @default(ISSUED)
+  cancelReason      String?       @map("cancel_reason")
+  printCount        Int           @default(0) @map("print_count")
+  createdById       String        @map("created_by_id")
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
+
+  tenant          Tenant            @relation(fields: [tenantId], references: [id])
+  party           Party             @relation(fields: [partyId], references: [id])
+  originalInvoice Invoice           @relation(fields: [originalInvoiceId], references: [id])
+  godown          Godown            @relation(fields: [godownId], references: [id])
+  createdBy       User              @relation(fields: [createdById], references: [id])
+  items           SalesReturnItem[]
+
+  @@unique([tenantId, fiscalYear, returnNo])
+  @@index([tenantId, partyId])
+  @@index([originalInvoiceId])
+  @@map("sales_returns")
+}
+
+model SalesReturnItem {
+  id            String   @id @default(uuid())
+  tenantId      String   @map("tenant_id")
+  salesReturnId String   @map("sales_return_id")
+  productId     String   @map("product_id")
+  unitId        String   @map("unit_id")
+  batchId       String?  @map("batch_id")
+  quantity      Decimal  @db.Decimal(14, 3) // in the chosen unit
+  baseQuantity  Decimal  @map("base_quantity") @db.Decimal(14, 3)
+  rate          Decimal  @db.Decimal(14, 2)
+  discount      Decimal  @default(0) @db.Decimal(14, 2)
+  vatAmount     Decimal  @default(0) @map("vat_amount") @db.Decimal(14, 2)
+  amount        Decimal  @db.Decimal(14, 2)
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  tenant      Tenant      @relation(fields: [tenantId], references: [id])
+  salesReturn SalesReturn @relation(fields: [salesReturnId], references: [id])
+  product     Product     @relation(fields: [productId], references: [id])
+  unit        ProductUnit @relation(fields: [unitId], references: [id])
+  batch       Batch?      @relation(fields: [batchId], references: [id])
+
+  @@index([salesReturnId])
+  @@index([tenantId, productId])
+  @@map("sales_return_items")
+}
+
+// ─── Money ──────────────────────────────────────────────────────────────────
+
+// Append-only. A wrong payment is corrected by a new row with reversalOfId set.
+// Money received from customers (IN) or paid to suppliers (OUT). Rows are never
+// deleted; a reversal or bounced cheque flips status and adds reversal ledger
+// and allocation rows.
+model Payment {
+  id             String           @id @default(uuid())
+  tenantId       String           @map("tenant_id")
+  partyId        String           @map("party_id")
+  direction      PaymentDirection
+  fiscalYear     String           @map("fiscal_year")
+  receiptNo      Int              @map("receipt_no") // per direction + fiscal year
+  method         PaymentMethod
+  amount         Decimal          @db.Decimal(14, 2)
+  status         PaymentStatus    @default(ACTIVE)
+  referenceNo    String?          @map("reference_no") // bank / wallet txn id
+  chequeNo       String?          @map("cheque_no")
+  chequeBank     String?          @map("cheque_bank")
+  chequeDate     DateTime?        @map("cheque_date") @db.Date
+  chequeStatus   ChequeStatus?    @map("cheque_status")
+  note           String?
+  paymentDate    DateTime         @map("payment_date") @db.Date
+  receivedById   String           @map("received_by_id") // who entered it
+  collectedById  String           @map("collected_by_id") // who physically holds the money
+  handoverId     String?          @map("handover_id")
+  clientUuid     String?          @unique @map("client_uuid")
+  reversedAt     DateTime?        @map("reversed_at")
+  reversedById   String?          @map("reversed_by_id")
+  reversalReason String?          @map("reversal_reason")
+  createdAt      DateTime         @default(now()) @map("created_at")
+
+  tenant      Tenant              @relation(fields: [tenantId], references: [id])
+  party       Party               @relation(fields: [partyId], references: [id])
+  receivedBy  User                @relation("PaymentReceivedBy", fields: [receivedById], references: [id])
+  collectedBy User                @relation("PaymentCollectedBy", fields: [collectedById], references: [id])
+  reversedBy  User?               @relation("PaymentReversedBy", fields: [reversedById], references: [id])
+  handover    CashHandover?       @relation(fields: [handoverId], references: [id])
+  allocations PaymentAllocation[]
+
+  @@unique([tenantId, direction, fiscalYear, receiptNo])
+  @@index([tenantId, partyId, paymentDate])
+  @@index([tenantId, paymentDate])
+  @@index([tenantId, collectedById, handoverId])
+  @@map("payments")
+}
+
+// Which invoices a payment settles. Append-only: undoing an allocation adds a
+// negative row. Invoice outstanding = total - SUM(amount).
+model PaymentAllocation {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  paymentId String   @map("payment_id")
+  invoiceId String   @map("invoice_id")
+  amount    Decimal  @db.Decimal(14, 2)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id])
+  payment Payment @relation(fields: [paymentId], references: [id])
+  invoice Invoice @relation(fields: [invoiceId], references: [id])
+
+  @@index([invoiceId])
+  @@index([paymentId])
+  @@index([tenantId])
+  @@map("payment_allocations")
+}
+
+// Cash a salesman/driver hands to the office.
+model CashHandover {
+  id             String         @id @default(uuid())
+  tenantId       String         @map("tenant_id")
+  handoverNo     String         @map("handover_no")
+  fromUserId     String         @map("from_user_id")
+  receivedById   String?        @map("received_by_id")
+  expectedAmount Decimal        @map("expected_amount") @db.Decimal(14, 2)
+  receivedAmount Decimal?       @map("received_amount") @db.Decimal(14, 2)
+  difference     Decimal?       @db.Decimal(14, 2) // received - expected
+  status         HandoverStatus @default(SUBMITTED)
+  note           String?
+  createdAt      DateTime       @default(now()) @map("created_at")
+  verifiedAt     DateTime?      @map("verified_at")
+  updatedAt      DateTime       @updatedAt @map("updated_at")
+
+  tenant     Tenant    @relation(fields: [tenantId], references: [id])
+  fromUser   User      @relation("HandoverFrom", fields: [fromUserId], references: [id])
+  receivedBy User?     @relation("HandoverReceivedBy", fields: [receivedById], references: [id])
+  payments   Payment[]
+
+  @@unique([tenantId, handoverNo])
+  @@index([tenantId, status])
+  @@index([tenantId, fromUserId])
+  @@map("cash_handovers")
+}
+
+// Per-tenant settings (one row per tenant; defaults apply when missing).
+model TenantSetting {
+  tenantId         String   @id @map("tenant_id")
+  overdueGraceDays Int      @default(7) @map("overdue_grace_days")
+  blockOnOverdue   Boolean  @default(true) @map("block_on_overdue")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@map("tenant_settings")
+}
+
+// Append-only. Party balance = SUM(debit) - SUM(credit); never stored.
+model LedgerEntry {
+  id        String          @id @default(uuid())
+  tenantId  String          @map("tenant_id")
+  partyId   String          @map("party_id")
+  entryDate DateTime        @map("entry_date") @db.Date
+  type      LedgerEntryType
+  debit     Decimal         @default(0) @db.Decimal(14, 2)
+  credit    Decimal         @default(0) @db.Decimal(14, 2)
+  refType   String          @map("ref_type")
+  refId     String          @map("ref_id")
+  narration String?
+  createdAt DateTime        @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  party  Party  @relation(fields: [partyId], references: [id])
+
+  @@index([tenantId, partyId, entryDate])
+  @@index([refType, refId])
+  @@map("ledger_entries")
+}
+
+// Gap-free document numbers per tenant, document type and fiscal year.
+// Incremented with INSERT ... ON CONFLICT DO UPDATE ... RETURNING inside the
+// document's transaction (see src/common/numbering).
+model DocSequence {
+  id         String   @id @default(uuid())
+  tenantId   String   @map("tenant_id")
+  docType    DocType  @map("doc_type")
+  fiscalYear String   @map("fiscal_year")
+  lastNumber Int      @default(0) @map("last_number")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, docType, fiscalYear])
+  @@map("doc_sequences")
+}
+
+// Owner/manager permission to bill ONE invoice (up to `amount`) past the
+// party's credit limit, valid until the end of the Nepal day it was requested.
+model CreditApproval {
+  id              String               @id @default(uuid())
+  tenantId        String               @map("tenant_id")
+  partyId         String               @map("party_id")
+  amount          Decimal              @db.Decimal(14, 2)
+  reason          String
+  status          CreditApprovalStatus @default(PENDING)
+  requestedById   String               @map("requested_by_id")
+  approvedById    String?              @map("approved_by_id") // who approved or rejected
+  decidedAt       DateTime?            @map("decided_at")
+  decisionNote    String?              @map("decision_note")
+  expiresAt       DateTime             @map("expires_at")
+  usedByInvoiceId String?              @unique @map("used_by_invoice_id")
+  createdAt       DateTime             @default(now()) @map("created_at")
+  updatedAt       DateTime             @updatedAt @map("updated_at")
+
+  tenant        Tenant   @relation(fields: [tenantId], references: [id])
+  party         Party    @relation(fields: [partyId], references: [id])
+  requestedBy   User     @relation("CreditRequestedBy", fields: [requestedById], references: [id])
+  approvedBy    User?    @relation("CreditDecidedBy", fields: [approvedById], references: [id])
+  usedByInvoice Invoice? @relation(fields: [usedByInvoiceId], references: [id])
+
+  @@index([tenantId, status])
+  @@index([tenantId, partyId])
+  @@map("credit_approvals")
+}
+
+// ─── Audit ──────────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id        String      @id @default(uuid())
+  tenantId  String      @map("tenant_id")
+  userId    String      @map("user_id")
+  entity    String // model name, e.g. "Invoice"
+  entityId  String      @map("entity_id")
+  action    AuditAction
+  oldValue  Json?       @map("old_value")
+  newValue  Json?       @map("new_value")
+  createdAt DateTime    @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  user   User   @relation(fields: [userId], references: [id])
+
+  @@index([tenantId, entity, entityId])
+  @@index([tenantId, createdAt])
+  @@map("audit_logs")
+}

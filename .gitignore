@@ -19,6 +19,10 @@ apps/api/.env
 apps/api/*.tsbuildinfo
 apps/api/src/generated/
 
+# --- JavaScript API (apps/api-js) ---
+apps/api-js/.env
+apps/api-js/src/generated/
+
 # --- Next.js (apps/web) ---
 apps/web/.next/
 apps/web/out/

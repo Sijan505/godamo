@@ -1,0 +1,13 @@
+{
+  "name": "godamo",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix apps/api-js run dev",
+    "start": "npm --prefix apps/api-js start",
+    "test": "npm --prefix apps/api-js test",
+    "dev:old": "concurrently -k -n api,web -c blue,green \"npm --prefix apps/api run start:dev\" \"npm --prefix apps/web run dev\""
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.5"
+  }
+}

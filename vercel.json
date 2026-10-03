@@ -1,0 +1,14 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "installCommand": "npm install --prefix apps/api-js",
+  "buildCommand": "npm --prefix apps/api-js run generate",
+  "outputDirectory": "apps/web-html",
+  "functions": {
+    "api/index.mjs": {
+      "maxDuration": 60,
+      "includeFiles": "{apps/web-html/*.html,apps/api-js/src/generated/prisma/**,apps/api-js/node_modules/pdfkit/js/data/**}"
+    }
+  },
+  "rewrites": [{ "source": "/(.*)", "destination": "/api" }]
+}
